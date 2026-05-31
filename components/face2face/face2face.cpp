@@ -476,6 +476,10 @@ void Face2Face::jpeg_deinit_() {
   if (enc_out_ != nullptr) { free(enc_out_); enc_out_ = nullptr; }
   if (dec_in_ != nullptr) { free(dec_in_); dec_in_ = nullptr; }
   if (dec_out_ != nullptr) { free(dec_out_); dec_out_ = nullptr; }
+  enc_in_cap_ = 0;
+  enc_out_cap_ = 0;
+  dec_in_cap_ = 0;
+  dec_out_cap_ = 0;
   jpeg_ready_ = false;
 }
 
@@ -510,8 +514,11 @@ void Face2Face::pump_video_tx_() {
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
+  // Resolution-agnostic: grow the DMA buffers to the ACTUAL camera frame size
+  // (e.g. 1280x720) instead of rejecting frames that don't match width_/height_.
   size_t frame_bytes = (size_t) w * h * 2;
-  if (frame_bytes <= (size_t) width_ * height_ * 2) {
+  if (ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
+      ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
     std::memcpy(enc_in_, rgb, frame_bytes);
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
@@ -526,12 +533,17 @@ void Face2Face::pump_video_tx_() {
       send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
     else
       ESP_LOGW(TAG, "jpeg encode failed: %d", err);
+  } else {
+    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
   }
   camera_->release_buffer(el);
 }
 
 bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
-  if (!jpeg_ready_ || len > dec_in_cap_)
+  if (!jpeg_ready_)
+    return false;
+  // Grow the decoder input buffer to the incoming JPEG size.
+  if (!ensure_dec_buf(&dec_in_, &dec_in_cap_, len, true))
     return false;
   std::memcpy(dec_in_, jpeg, len);
 
@@ -540,7 +552,8 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
     return false;
 
   size_t want = (size_t) info.width * info.height * 2;
-  if (want == 0 || want > dec_out_cap_)
+  // Grow the decoder output buffer to the decoded RGB565 size (any resolution).
+  if (want == 0 || !ensure_dec_buf(&dec_out_, &dec_out_cap_, want, false))
     return false;
 
   jpeg_decode_cfg_t cfg = {};

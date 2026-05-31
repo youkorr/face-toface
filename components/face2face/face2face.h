@@ -256,6 +256,7 @@ class Face2Face : public Component {
   void *jpeg_enc_{nullptr};
   void *jpeg_dec_{nullptr};
   uint8_t *enc_in_{nullptr};
+  size_t enc_in_cap_{0};
   uint8_t *enc_out_{nullptr};
   size_t enc_out_cap_{0};
   uint8_t *dec_in_{nullptr};
