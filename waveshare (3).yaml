@@ -3375,7 +3375,7 @@ lvgl:
                     radius: 36
                     bg_color: 0x22C55E
                     widgets:
-                      - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
+                      - label: { align: CENTER, text: "\U0000e90a", text_font: icons_32, text_color: 0xFFFFFF }
                     on_click:
                       - face2face.call: f2f
                 - button:
@@ -3387,7 +3387,7 @@ lvgl:
                     radius: 36
                     bg_color: 0xEF4444
                     widgets:
-                      - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
+                      - label: { align: CENTER, text: "\U0000e909", text_font: icons_32, text_color: 0xFFFFFF }
                     on_click:
                       - face2face.hangup: f2f
 
@@ -3424,7 +3424,7 @@ lvgl:
                     radius: 44
                     bg_color: 0x22C55E
                     widgets:
-                      - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
+                      - label: { align: CENTER, text: "\U0000e90a", text_font: icons_32, text_color: 0xFFFFFF }
                     on_click:
                       - face2face.answer: f2f
                       - lvgl.widget.hide: incoming_overlay
@@ -3437,7 +3437,7 @@ lvgl:
                     radius: 44
                     bg_color: 0xEF4444
                     widgets:
-                      - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
+                      - label: { align: CENTER, text: "\U0000e909", text_font: icons_32, text_color: 0xFFFFFF }
                     on_click:
                       - face2face.decline: f2f
                       - lvgl.widget.hide: incoming_overlay
