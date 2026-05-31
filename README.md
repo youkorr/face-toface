@@ -43,6 +43,17 @@ Conçu pour s'intégrer à **votre** stack Waveshare existante :
 - **Audio** : PCM 16 bit / 16 kHz mono brut sur UDP (~32 ko/s). Le micro ESPHome
   pousse les blocs via callback ; on les rejoue sur le speaker du pair.
 
+> 💡 **Recommandé pour l'audio + la logique d'appel : `esphome-intercom`.**
+> Le composant [`intercom_api`](https://github.com/n-IA-hane/esphome-intercom)
+> fait déjà exactement le même audio (PCM 16k/16-bit mono sur vos microphone/speaker)
+> **et** ajoute toute la signalisation d'appel (carnet d'adresses P2P en
+> `device_independent`, sonnerie, décrocher/raccrocher, états `on_ringing` /
+> `on_streaming` / `on_idle`). On câble alors `face2face` en **vidéo seule**
+> (`enable_audio: false`) et on démarre/arrête la vidéo sur les événements de
+> l'intercom. Voir `example/face2face-with-intercom.yaml` — c'est l'architecture
+> conseillée. L'audio intégré de `face2face` reste disponible pour un usage
+> autonome (sans appel/sonnerie).
+
 ## 2. Pourquoi un composant custom (et pas `camera_web_server`)
 
 `camera_web_server` (MJPEG over HTTP/TCP) ne tient pas bien la charge en temps
@@ -64,7 +75,8 @@ components/face2face/
   face2face.h      # protocole UDP + classe Component
   face2face.cpp    # UDP + JPEG matériel + caméra + audio
 example/
-  face2face-snippet.yaml   # à coller dans votre waveshare.yaml
+  face2face-snippet.yaml        # face2face seul (vidéo + audio intégré)
+  face2face-with-intercom.yaml  # RECOMMANDÉ : vidéo face2face + audio/appel intercom
 ```
 
 ## 5. Intégration YAML

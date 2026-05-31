@@ -1,0 +1,108 @@
+# =============================================================================
+# FaceTime sur ESP32-P4 = face2face (VIDÉO) + esphome-intercom (AUDIO + APPEL)
+# -----------------------------------------------------------------------------
+# Architecture recommandée :
+#   * esphome-intercom (intercom_api) : audio P2P + signalisation d'appel
+#     (sonnerie, décrocher, raccrocher) en mode device_independent.
+#   * face2face : flux VIDÉO seul (MJPEG matériel / UDP), démarré/arrêté
+#     automatiquement par les événements d'appel de l'intercom.
+#
+# À fusionner dans votre waveshare.yaml. Sur chaque carte, adaptez l'IP du pair.
+# =============================================================================
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [face2face]
+    refresh: always
+  - source: github://n-IA-hane/esphome-intercom
+    ref: main
+    # Version "plain" : pas besoin d'esp_audio_stack, on réutilise vos
+    # microphone/speaker existants. (Pour l'annulation d'écho, ajoutez
+    # esp_aec + esp_audio_stack — voir note en bas.)
+    components: [intercom_api]
+    refresh: always
+
+# --- AUDIO + signalisation d'appel (intercom) -------------------------------
+intercom_api:
+  id: intercom
+  microphone: esp32_microphone          # votre ES7210
+  speaker: media_resampling_speaker     # resampler 16k -> 48k (existe déjà)
+  buffers_in_psram: true
+  ringing_timeout: 30s
+
+  on_boot:
+    priority: -100
+    then:
+      - intercom_api.flush_contacts: { id: intercom }
+      - intercom_api.set_contacts:
+          id: intercom
+          # Carnet d'adresses : Nom|protocole|ip|port
+          contacts_csv: "Salon|tcp|192.168.1.51|6054"
+
+  # Quand l'appel est établi des deux côtés -> on lance la VIDÉO
+  on_streaming:
+    - lambda: "id(f2f).start_call();"
+    - logger.log: "Appel établi : démarrage vidéo"
+
+  # Fin d'appel -> on coupe la vidéo
+  on_idle:
+    - lambda: "id(f2f).stop_call();"
+
+  on_ringing:
+    - logger.log: "Appel entrant..."
+    # ex: afficher la page d'appel LVGL, jouer une sonnerie, etc.
+
+# --- VIDÉO seule (face2face) ------------------------------------------------
+face2face:
+  id: f2f
+  peer_ip: "192.168.1.51"        # IP de l'autre carte
+  camera_id: tab5_cam
+  enable_audio: false            # <-- l'audio est géré par l'intercom
+  video_port: 9000
+  width: 640
+  height: 480
+  framerate: 15
+  jpeg_quality: 40
+
+# --- Boutons d'appel (HA + LVGL) --------------------------------------------
+button:
+  - platform: template
+    name: "Appeler Salon"
+    on_press:
+      - intercom_api.call_contact: { id: intercom, contact: "Salon" }
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - intercom_api.answer_call: intercom
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - intercom_api.hangup_call: intercom
+
+# --- Rendu de la vidéo distante dans un canvas LVGL -------------------------
+interval:
+  - interval: 66ms
+    then:
+      - lambda: |-
+          if (id(f2f).has_new_remote_frame()) {
+            const uint8_t *rgb = id(f2f).remote_rgb565();
+            if (rgb != nullptr) {
+              lv_canvas_set_buffer(id(remote_video), (void*)rgb,
+                  id(f2f).remote_width(), id(f2f).remote_height(),
+                  LV_COLOR_FORMAT_RGB565);
+              lv_obj_invalidate(id(remote_video));
+            }
+          }
+
+# -----------------------------------------------------------------------------
+# Widget canvas à placer dans vos pages lvgl (taille = width x height) :
+#   - canvas: { id: remote_video, x: 0, y: 0, width: 640, height: 480 }
+# Self-view local : votre lvgl_camera_display existant sur un petit canvas.
+#
+# ÉCHO / mains-libres : sans annulation d'écho, le micro réémet le son du HP.
+# Pour un vrai mode haut-parleur, utilisez la variante esp_aec + esp_audio_stack
+# de l'intercom (voir son README) au lieu de vos microphone/speaker bruts.
+# -----------------------------------------------------------------------------
