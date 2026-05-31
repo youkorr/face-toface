@@ -77,7 +77,21 @@ components/face2face/
 example/
   face2face-snippet.yaml        # face2face seul (vidéo + audio intégré)
   face2face-with-intercom.yaml  # RECOMMANDÉ : vidéo face2face + audio/appel intercom
+  lvgl-call-page.yaml           # page d'appel LVGL 9.5 moderne (1024x600) + présence
 ```
+
+## 4bis. Présence : « l'autre est-il connecté ? »
+
+`face2face` envoie un **heartbeat UDP** (1/s) au pair, en permanence (même hors
+appel). Chaque carte sait donc si l'autre est joignable :
+
+```cpp
+id(f2f).peer_online()        // true si paquet reçu du pair < 4 s
+id(f2f).peer_last_seen_ms()  // millis() du dernier paquet reçu
+```
+
+Exposé en YAML via un `binary_sensor` template (→ Home Assistant) et une pastille
+verte/grise dans la barre de statut LVGL (voir `example/lvgl-call-page.yaml`).
 
 ## 5. Intégration YAML
 

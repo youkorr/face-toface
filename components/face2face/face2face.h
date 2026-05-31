@@ -35,6 +35,7 @@ static constexpr uint16_t F2F_MAX_PAYLOAD = 1400;
 enum F2FStream : uint8_t {
   F2F_STREAM_VIDEO = 0,
   F2F_STREAM_AUDIO = 1,
+  F2F_STREAM_PING = 2,  // tiny header-only heartbeat for presence detection
 };
 
 enum F2FFlags : uint8_t {
@@ -94,6 +95,13 @@ class Face2Face : public Component {
   void stop_call();
   bool in_call() const { return in_call_; }
 
+  // ---- Presence (heartbeat): is the other board reachable right now? ----
+  bool peer_online() const {
+    return last_peer_rx_ms_ != 0 && (millis() - last_peer_rx_ms_) < presence_timeout_ms_;
+  }
+  uint32_t peer_last_seen_ms() const { return last_peer_rx_ms_; }
+  void set_presence_timeout(uint32_t ms) { presence_timeout_ms_ = ms; }
+
   // ---- Remote video access (pushed to an LVGL canvas by a YAML lambda) ----
   const uint8_t *remote_rgb565() const { return remote_fb_.empty() ? nullptr : remote_fb_.data(); }
   uint16_t remote_width() const { return width_; }
@@ -110,6 +118,7 @@ class Face2Face : public Component {
   void poll_receive_();
   void send_frame_(F2FStream stream, const uint8_t *data, uint32_t len, int sock);
   void handle_packet_(const uint8_t *buf, size_t len, F2FStream expected);
+  void send_ping_();
 
   // hardware JPEG codec (esp_driver_jpeg)
   bool jpeg_init_();
@@ -145,6 +154,11 @@ class Face2Face : public Component {
   uint16_t tx_video_frame_id_{0};
   uint16_t tx_audio_frame_id_{0};
   uint32_t last_tx_us_{0};
+
+  // presence / heartbeat
+  uint32_t last_peer_rx_ms_{0};       // millis() of last packet from peer
+  uint32_t last_ping_tx_ms_{0};
+  uint32_t presence_timeout_ms_{4000};
 
   FrameAssembler video_asm_;
   FrameAssembler audio_asm_;

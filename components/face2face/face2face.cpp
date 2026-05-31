@@ -71,6 +71,14 @@ void Face2Face::loop() {
 
   poll_receive_();
 
+  // Heartbeat: advertise our presence to the peer once per second, even when
+  // no call is active, so each side can tell whether the other is reachable.
+  uint32_t now_ms = millis();
+  if (now_ms - last_ping_tx_ms_ >= 1000) {
+    last_ping_tx_ms_ = now_ms;
+    send_ping_();
+  }
+
   if (in_call_ && jpeg_ready_ && camera_ != nullptr) {
     uint32_t now = micros();
     uint32_t period = 1000000UL / framerate_;
@@ -186,6 +194,19 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
   }
 }
 
+void Face2Face::send_ping_() {
+  struct sockaddr_in dst {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(video_port_);
+  ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
+  F2FHeader h{};
+  h.magic = F2F_MAGIC;
+  h.stream = F2F_STREAM_PING;
+  h.flags = F2F_FLAG_LAST;
+  h.frag_count = 1;
+  ::sendto(video_sock_, &h, sizeof(h), 0, (struct sockaddr *) &dst, sizeof(dst));
+}
+
 void Face2Face::poll_receive_() {
   uint8_t buf[F2F_HEADER_SIZE + F2F_MAX_PAYLOAD];
   for (int i = 0; i < 64; i++) {
@@ -210,7 +231,13 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
   if (len < F2F_HEADER_SIZE)
     return;
   auto *hdr = reinterpret_cast<const F2FHeader *>(buf);
-  if (hdr->magic != F2F_MAGIC || hdr->stream != expected)
+  if (hdr->magic != F2F_MAGIC)
+    return;
+  // Any valid packet from the peer counts as presence.
+  last_peer_rx_ms_ = millis();
+  if (hdr->stream == F2F_STREAM_PING)
+    return;  // heartbeat only, nothing else to do
+  if (hdr->stream != expected)
     return;
   if (F2F_HEADER_SIZE + hdr->payload_len > len)
     return;
