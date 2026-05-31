@@ -1,0 +1,6 @@
+# ESPHome build artifacts and local test files
+example/.esphome/
+example/secrets.yaml
+example/_test-local.yaml
+*.pyc
+__pycache__/
