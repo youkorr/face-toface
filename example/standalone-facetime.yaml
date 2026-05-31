@@ -154,6 +154,9 @@ face2face:
   enable_audio: true
   audio_sample_rate: 16000
   ring_timeout: 30s
+  enable_aec: true               # annulation d'écho ESP-SR (pulle esp-sr)
+  aec_mode: voip_high_perf
+  aec_filter_length: 4
   width: 640
   height: 480
   framerate: 15

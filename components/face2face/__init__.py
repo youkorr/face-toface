@@ -16,7 +16,7 @@ call between two ESP32-P4 boards. No external intercom dependency:
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import microphone, speaker
+from esphome.components import esp32, microphone, speaker
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@youkorr"]
@@ -36,6 +36,19 @@ CONF_ENABLE_AUDIO = "enable_audio"
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_RING_TIMEOUT = "ring_timeout"
 CONF_AUTO_ANSWER = "auto_answer"
+CONF_ENABLE_AEC = "enable_aec"
+CONF_AEC_MODE = "aec_mode"
+CONF_AEC_FILTER_LENGTH = "aec_filter_length"
+
+# ESP-SR aec_mode_t values (from esp_aec.h).
+AEC_MODES = {
+    "sr_low_cost": 0,
+    "sr_high_perf": 1,
+    "voip_low_cost": 3,
+    "voip_high_perf": 4,
+    "fd_low_cost": 5,
+    "fd_high_perf": 6,
+}
 CONF_ON_RINGING = "on_ringing"
 CONF_ON_OUTGOING_CALL = "on_outgoing_call"
 CONF_ON_STREAMING = "on_streaming"
@@ -77,6 +90,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUDIO_SAMPLE_RATE, default=16000): cv.int_,
         cv.Optional(CONF_RING_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_AUTO_ANSWER, default=False): cv.boolean,
+        cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
+        cv.Optional(CONF_AEC_MODE, default="voip_high_perf"): cv.enum(AEC_MODES, lower=True),
+        cv.Optional(CONF_AEC_FILTER_LENGTH, default=4): cv.int_range(min=1, max=8),
         cv.Optional(CONF_ON_RINGING): _trigger(),
         cv.Optional(CONF_ON_OUTGOING_CALL): _trigger(),
         cv.Optional(CONF_ON_STREAMING): _trigger(),
@@ -99,6 +115,17 @@ async def to_code(config):
     cg.add(var.set_audio_sample_rate(config[CONF_AUDIO_SAMPLE_RATE]))
     cg.add(var.set_ring_timeout(config[CONF_RING_TIMEOUT]))
     cg.add(var.set_auto_answer(config[CONF_AUTO_ANSWER]))
+    cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
+    cg.add(var.set_aec_mode(config[CONF_AEC_MODE]))
+    cg.add(var.set_aec_filter_length(config[CONF_AEC_FILTER_LENGTH]))
+
+    # Acoustic echo cancellation: pull Espressif ESP-SR and compile the AEC path
+    # only when enabled (keeps the component dependency-free otherwise).
+    if config[CONF_ENABLE_AEC]:
+        esp32.add_idf_component(
+            name="esp-sr", repo="https://github.com/espressif/esp-sr", ref="master"
+        )
+        cg.add_define("FACE2FACE_USE_AEC")
 
     cam = await cg.get_variable(config[CONF_CAMERA_ID])
     cg.add(var.set_camera(cam))

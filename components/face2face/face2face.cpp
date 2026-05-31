@@ -20,6 +20,13 @@
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
+// Acoustic echo cancellation (Espressif ESP-SR). Only compiled when enabled in
+// YAML (enable_aec), which also pulls the esp-sr managed component.
+#ifdef FACE2FACE_USE_AEC
+#include "esp_aec.h"
+#include "esp_heap_caps.h"
+#endif
+
 namespace esphome {
 namespace face2face {
 
@@ -60,6 +67,8 @@ void Face2Face::setup() {
   if (audio_enabled_ && spk_ != nullptr) {
     spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
   }
+  if (audio_enabled_ && aec_enabled_)
+    aec_init_();
   ESP_LOGCONFIG(TAG, "face2face ready (peer=%s v:%u a:%u)", peer_ip_.c_str(), video_port_, audio_port_);
 }
 
@@ -105,6 +114,7 @@ void Face2Face::dump_config() {
   ESP_LOGCONFIG(TAG, "  Video: %ux%u @ %u fps, JPEG q=%u", width_, height_, framerate_, jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Audio: %s @ %u Hz  (mic:%s spk:%s)", YESNO(audio_enabled_), audio_sample_rate_,
                 mic_ ? "yes" : "no", spk_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  AEC: %s", aec_ready_ ? "active" : (aec_enabled_ ? "enabled (not ready)" : "off"));
   ESP_LOGCONFIG(TAG, "  Ring timeout: %u ms, auto-answer: %s", ring_timeout_ms_, YESNO(auto_answer_));
 }
 
@@ -499,17 +509,109 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
 }
 
 // ===========================================================================
-// Audio (ESPHome microphone -> UDP -> speaker)
+// Audio (ESPHome microphone -> [AEC] -> UDP -> speaker)
 // ===========================================================================
+bool Face2Face::aec_init_() {
+#ifdef FACE2FACE_USE_AEC
+  if (mic_ == nullptr || spk_ == nullptr) {
+    ESP_LOGW(TAG, "AEC needs both microphone and speaker; disabled");
+    return false;
+  }
+  auto *h = aec_create((int) audio_sample_rate_, aec_filter_length_, 1, (aec_mode_t) aec_mode_);
+  if (h == nullptr) {
+    ESP_LOGW(TAG, "aec_create failed");
+    return false;
+  }
+  aec_handle_ = h;
+  aec_chunk_ = aec_get_chunksize(h);
+  if (aec_chunk_ <= 0) {
+    aec_destroy(h);
+    aec_handle_ = nullptr;
+    return false;
+  }
+  size_t bytes = (size_t) aec_chunk_ * sizeof(int16_t);
+  aec_in_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  aec_ref_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  aec_out_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  if (aec_in_ == nullptr || aec_ref_ == nullptr || aec_out_ == nullptr) {
+    ESP_LOGW(TAG, "AEC buffer alloc failed");
+    return false;
+  }
+  ref_cap_ = (size_t) aec_chunk_ * 32;  // up to ~0.5-1 s of reference history
+  ref_buf_.assign(ref_cap_, 0);
+  ref_head_ = 0;
+  ref_count_ = 0;
+  mic_acc_.clear();
+  send_acc_.clear();
+  aec_ready_ = true;
+  ESP_LOGCONFIG(TAG, "AEC ready (chunk=%d samples, filter=%d, mode=%d)", aec_chunk_, aec_filter_length_, aec_mode_);
+  return true;
+#else
+  ESP_LOGW(TAG, "AEC requested but not compiled in (enable_aec pulls esp-sr)");
+  return false;
+#endif
+}
+
+void Face2Face::ref_push_(const int16_t *d, size_t n) {
+  if (ref_cap_ == 0)
+    return;
+  for (size_t i = 0; i < n; i++) {
+    size_t t = (ref_head_ + ref_count_) % ref_cap_;
+    ref_buf_[t] = d[i];
+    if (ref_count_ < ref_cap_)
+      ref_count_++;
+    else
+      ref_head_ = (ref_head_ + 1) % ref_cap_;  // overwrite oldest
+  }
+}
+
+void Face2Face::ref_pop_(int16_t *d, size_t n) {
+  size_t k = 0;
+  while (k < n && ref_count_ > 0) {
+    d[k++] = ref_buf_[ref_head_];
+    ref_head_ = (ref_head_ + 1) % ref_cap_;
+    ref_count_--;
+  }
+  while (k < n)  // underflow (speaker silent) -> zero reference = no echo
+    d[k++] = 0;
+}
+
 void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
   if (state_ != STATE_STREAMING || data.empty())
     return;
+
+#ifdef FACE2FACE_USE_AEC
+  if (aec_ready_) {
+    const int16_t *in = reinterpret_cast<const int16_t *>(data.data());
+    mic_acc_.insert(mic_acc_.end(), in, in + data.size() / 2);
+    send_acc_.clear();
+    size_t off = 0;
+    while (mic_acc_.size() - off >= (size_t) aec_chunk_) {
+      std::memcpy(aec_in_, mic_acc_.data() + off, (size_t) aec_chunk_ * sizeof(int16_t));
+      ref_pop_(aec_ref_, aec_chunk_);  // time-aligned far-end reference
+      aec_process(static_cast<const aec_handle_t *>(aec_handle_), aec_in_, aec_ref_, aec_out_);
+      send_acc_.insert(send_acc_.end(), aec_out_, aec_out_ + aec_chunk_);
+      off += aec_chunk_;
+    }
+    if (off > 0)
+      mic_acc_.erase(mic_acc_.begin(), mic_acc_.begin() + off);
+    if (!send_acc_.empty())
+      send_frame_(F2F_STREAM_AUDIO, reinterpret_cast<const uint8_t *>(send_acc_.data()),
+                  send_acc_.size() * sizeof(int16_t), audio_sock_);
+    return;
+  }
+#endif
   send_frame_(F2F_STREAM_AUDIO, data.data(), data.size(), audio_sock_);
 }
 
 void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
   if (spk_ == nullptr || len == 0 || state_ != STATE_STREAMING)
     return;
+#ifdef FACE2FACE_USE_AEC
+  // The far-end audio we are about to play is the echo reference for the mic.
+  if (aec_ready_)
+    ref_push_(reinterpret_cast<const int16_t *>(pcm), len / 2);
+#endif
   spk_->play(pcm, len);
 }
 

@@ -102,6 +102,9 @@ class Face2Face : public Component {
   void set_jpeg_quality(uint8_t q) { jpeg_quality_ = q; }
   void set_audio_enabled(bool e) { audio_enabled_ = e; }
   void set_audio_sample_rate(uint32_t r) { audio_sample_rate_ = r; }
+  void set_aec_enabled(bool e) { aec_enabled_ = e; }
+  void set_aec_filter_length(int n) { aec_filter_length_ = n; }
+  void set_aec_mode(int m) { aec_mode_ = m; }
   void set_ring_timeout(uint32_t ms) { ring_timeout_ms_ = ms; }
   void set_auto_answer(bool a) { auto_answer_ = a; }
   void set_camera(esp_cam_sensor::MipiDSICamComponent *cam) { camera_ = cam; }
@@ -163,6 +166,11 @@ class Face2Face : public Component {
   void on_mic_data_(const std::vector<uint8_t> &data);
   void play_audio_(const uint8_t *pcm, uint32_t len);
 
+  // acoustic echo cancellation (ESP-SR esp_aec)
+  bool aec_init_();
+  void ref_push_(const int16_t *d, size_t n);  // store far-end (speaker) samples
+  void ref_pop_(int16_t *d, size_t n);         // fetch time-aligned reference
+
   // config
   std::string peer_ip_;
   uint16_t video_port_{9000};
@@ -175,6 +183,9 @@ class Face2Face : public Component {
   uint32_t audio_sample_rate_{16000};
   uint32_t ring_timeout_ms_{30000};
   bool auto_answer_{false};
+  bool aec_enabled_{true};
+  int aec_filter_length_{4};
+  int aec_mode_{4};  // AEC_MODE_VOIP_HIGH_PERF
 
   // peers
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
@@ -211,6 +222,20 @@ class Face2Face : public Component {
   uint16_t remote_w_{0};
   uint16_t remote_h_{0};
   bool new_remote_frame_{false};
+
+  // AEC runtime
+  void *aec_handle_{nullptr};
+  bool aec_ready_{false};
+  int aec_chunk_{0};            // samples per aec_process() call
+  int16_t *aec_in_{nullptr};    // 16-byte aligned scratch (mic / ref / out)
+  int16_t *aec_ref_{nullptr};
+  int16_t *aec_out_{nullptr};
+  std::vector<int16_t> mic_acc_;   // accumulates mic samples to chunk boundaries
+  std::vector<int16_t> send_acc_;  // accumulates AEC output to ship
+  std::vector<int16_t> ref_buf_;   // ring buffer of far-end (reference) samples
+  size_t ref_cap_{0};
+  size_t ref_head_{0};
+  size_t ref_count_{0};
 
   // hardware JPEG handles + DMA buffers
   void *jpeg_enc_{nullptr};

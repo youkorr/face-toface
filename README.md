@@ -66,12 +66,25 @@ on_press:
 `on_ringing`, `on_outgoing_call`, `on_streaming`, `on_idle`
 (+ option `auto_answer: true` pour un mode interphone, `ring_timeout`).
 
-> 🔊 **Écho (AEC).** Sans annulation d'écho, en mains-libres le micro réémet le son
-> du HP. Pour un vrai haut-parleur, ajoutez l'AEC d'Espressif **ESP-SR** (`esp_aec`,
-> 16 kHz, `AEC_MODE_SR_LOW_COST`, buffers `int16` alignés 16 o) : comme votre
-> référence vient d'un codec externe (ES8311/ES7210), c'est de l'**AEC matériel**.
-> Non inclus par défaut pour rester sans dépendance ; voir §7. En attendant :
-> casque/oreillette ou push-to-talk évitent l'écho.
+### Annulation d'écho (AEC) — ESP-SR, intégrée
+
+Le mains-libres est géré par l'**AEC d'Espressif ESP-SR** (`esp_aec`), intégrée
+directement dans face2face. À chaque trame micro : `aec_process(mic, référence)`
+où la **référence** = l'audio reçu du pair (ce que joue le HP). Le résultat
+nettoyé est envoyé au pair.
+
+```yaml
+face2face:
+  enable_aec: true            # défaut ; pulle esp-sr et compile le chemin AEC
+  aec_mode: voip_high_perf    # sr_low_cost | voip_low_cost | voip_high_perf | fd_*
+  aec_filter_length: 4        # 1-8 (plus grand = plus de RAM/CPU)
+```
+
+- `enable_aec: false` → aucun appel esp-sr, aucune dépendance ajoutée.
+- Trames alignées via un ring buffer de référence ; si le HP est silencieux, la
+  référence est nulle (pas d'écho à annuler).
+- Buffers `int16` alignés 16 o (`heap_caps_aligned_alloc`), 16 kHz mono, comme
+  recommandé par Espressif.
 
 ## 2. Pourquoi un composant custom (et pas `camera_web_server`)
 
@@ -154,16 +167,18 @@ Affichage : un widget `canvas` (`id: remote_video`) + un `interval` qui appelle
    `framerate`, la résolution ou `jpeg_quality`.
 5. **WiFi via ESP-Hosted (C6)** : les deux cartes sur le même LAN.
 
+6. **AEC / esp-sr** : `enable_aec: true` (défaut) ajoute le composant managé
+   `espressif/esp-sr` (gros). À la 1ʳᵉ compilation, vérifiez la `ref` esp-sr dans
+   `__init__.py` (par défaut `master`) et l'espace flash. Si vous partagez le micro
+   avec `voice_assistant`/`micro_wake_word`, coupez-les pendant l'appel (le micro
+   ne peut servir deux pipelines de capture simultanés proprement).
+
 ## 7. Pistes d'évolution
 
-- **AEC (annulation d'écho)** pour le mains-libres : intégrer **ESP-SR** `esp_aec`
-  dans `on_mic_data_` avant l'envoi (16 kHz, `AEC_MODE_SR_LOW_COST`, filter
-  length 4, buffers `int16` alignés 16 o via `heap_caps_aligned_alloc`). La
-  référence (sortie HP) venant d'un codec externe (ES8311/ES7210) → AEC matériel.
-  Gate l'AEC quand le HP a joué dans les ~250 ms.
 - **H.264** au lieu de MJPEG (votre `CONFIG_ESP_H264_DUAL_TASK` est déjà activé) :
   meilleur débit, mais gestion des I-frames sur UDP à coder.
 - **Jitter buffer audio** (petit tampon de ré-ordonnancement) pour lisser le réseau.
+- **Délai de référence AEC** ajustable si l'écho persiste (aligner ref/mic).
 - **Découverte** via Home Assistant au lieu d'IP codée en dur.
 
 ## Sources
