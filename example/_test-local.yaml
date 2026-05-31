@@ -62,11 +62,9 @@ external_components:
     components: [lvgl, image, font]
     refresh: always
   - source:
-      type: git
-      url: https://github.com/youkorr/face-toface
-      ref: claude/esp32p4-video-communication-W0yEc
+      type: local
+      path: ../components
     components: [face2face]
-    refresh: always
 
 i2c:
   - id: bsp_bus
@@ -341,3 +339,14 @@ lvgl:
                   on_click:
                     - face2face.decline: f2f
                     - lvgl.widget.hide: incoming_overlay
+
+esp32_hosted:
+  variant: ESP32C6
+  active_high: false
+  reset_pin: 15
+  clk_pin: 18
+  cmd_pin: 19
+  d0_pin: 20
+  d1_pin: 21
+  d2_pin: 22
+  d3_pin: 23

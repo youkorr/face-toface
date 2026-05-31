@@ -76,7 +76,7 @@ def _trigger():
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(Face2Face),
-        cv.Required(CONF_PEER_IP): cv.ipv4,
+        cv.Required(CONF_PEER_IP): cv.ipv4address,
         cv.Required(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
         cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
@@ -160,25 +160,25 @@ async def to_code(config):
 F2F_ACTION_SCHEMA = automation.maybe_simple_id({cv.GenerateID(): cv.use_id(Face2Face)})
 
 
-@automation.register_action("face2face.call", CallAction, F2F_ACTION_SCHEMA)
+@automation.register_action("face2face.call", CallAction, F2F_ACTION_SCHEMA, synchronous=True)
 async def f2f_call_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
 
-@automation.register_action("face2face.answer", AnswerAction, F2F_ACTION_SCHEMA)
+@automation.register_action("face2face.answer", AnswerAction, F2F_ACTION_SCHEMA, synchronous=True)
 async def f2f_answer_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
 
-@automation.register_action("face2face.hangup", HangupAction, F2F_ACTION_SCHEMA)
+@automation.register_action("face2face.hangup", HangupAction, F2F_ACTION_SCHEMA, synchronous=True)
 async def f2f_hangup_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
 
-@automation.register_action("face2face.decline", DeclineAction, F2F_ACTION_SCHEMA)
+@automation.register_action("face2face.decline", DeclineAction, F2F_ACTION_SCHEMA, synchronous=True)
 async def f2f_decline_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
