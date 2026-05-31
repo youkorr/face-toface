@@ -168,6 +168,10 @@ void Face2Face::hangup() {
 
 void Face2Face::start_streaming_() {
   set_state_(STATE_STREAMING);
+  // Fire on_streaming first so YAML can stop wake-word / voice_assistant and
+  // release the microphone *before* we start capturing it ourselves.
+  if (on_streaming_ != nullptr)
+    on_streaming_->trigger();
   if (camera_ != nullptr && !camera_->is_streaming())
     camera_->start_streaming();
   if (audio_enabled_) {
@@ -179,8 +183,6 @@ void Face2Face::start_streaming_() {
     }
   }
   ESP_LOGI(TAG, "Call established (streaming)");
-  if (on_streaming_ != nullptr)
-    on_streaming_->trigger();
 }
 
 void Face2Face::go_idle_() {

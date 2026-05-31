@@ -2940,9 +2940,14 @@ face2face:
   on_outgoing_call:
     - lvgl.page.show: call_page
   on_streaming:
+    # Libère le micro pour l'appel : coupe wake-word + assistant vocal.
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
     - lvgl.widget.hide: incoming_overlay
     - lvgl.page.show: call_page
   on_idle:
+    # Fin d'appel : ré-arme la détection de mot d'éveil.
+    - micro_wake_word.start:
     - lvgl.widget.hide: incoming_overlay
 
 # Présence : l'autre carte est-elle joignable (heartbeat UDP de face2face) ?
