@@ -428,39 +428,52 @@ bool Face2Face::jpeg_init_() {
     ESP_LOGE(TAG, "jpeg_new_encoder_engine failed");
     return false;
   }
-  size_t in_size = (size_t) width_ * height_ * 2;
-  jpeg_encode_memory_alloc_cfg_t in_cfg = {};
-  in_cfg.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER;
-  size_t in_alloc = 0;
-  enc_in_ = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(in_size, &in_cfg, &in_alloc));
-  jpeg_encode_memory_alloc_cfg_t out_cfg = {};
-  out_cfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
-  enc_out_cap_ = in_size;
-  enc_out_ = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(enc_out_cap_, &out_cfg, &enc_out_cap_));
-
   jpeg_decode_engine_cfg_t dec_eng = {};
   dec_eng.timeout_ms = 40;
   if (jpeg_new_decoder_engine(&dec_eng, reinterpret_cast<jpeg_decoder_handle_t *>(&jpeg_dec_)) != ESP_OK) {
     ESP_LOGE(TAG, "jpeg_new_decoder_engine failed");
     return false;
   }
-  jpeg_decode_memory_alloc_cfg_t din_cfg = {};
-  din_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-  size_t din_alloc = 0;
-  dec_in_cap_ = in_size;
-  dec_in_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(dec_in_cap_, &din_cfg, &din_alloc));
-  jpeg_decode_memory_alloc_cfg_t dout_cfg = {};
-  dout_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-  dec_out_cap_ = in_size;
-  dec_out_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(dec_out_cap_, &dout_cfg, &dec_out_cap_));
-
-  if (enc_in_ == nullptr || enc_out_ == nullptr || dec_in_ == nullptr || dec_out_ == nullptr) {
-    ESP_LOGE(TAG, "JPEG DMA buffer allocation failed");
-    return false;
-  }
+  // DMA buffers (enc_in_/enc_out_/dec_in_/dec_out_) are grown lazily to the
+  // ACTUAL frame size in pump_video_tx_/decode_jpeg_, so any camera resolution
+  // (e.g. 1280x720) works without matching width_/height_ in YAML.
   jpeg_ready_ = true;
   ESP_LOGCONFIG(TAG, "Hardware JPEG codec ready");
   return true;
+}
+
+// Ensure a JPEG-encoder DMA buffer is at least `need` bytes (realloc if needed).
+static bool ensure_enc_buf(uint8_t **buf, size_t *cap, size_t need, bool input) {
+  if (*buf != nullptr && *cap >= need)
+    return true;
+  if (*buf != nullptr) {
+    free(*buf);
+    *buf = nullptr;
+    *cap = 0;
+  }
+  jpeg_encode_memory_alloc_cfg_t cfg = {};
+  cfg.buffer_direction = input ? JPEG_ENC_ALLOC_INPUT_BUFFER : JPEG_ENC_ALLOC_OUTPUT_BUFFER;
+  size_t got = 0;
+  *buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(need, &cfg, &got));
+  *cap = (*buf != nullptr) ? (got ? got : need) : 0;
+  return *buf != nullptr;
+}
+
+// Ensure a JPEG-decoder DMA buffer is at least `need` bytes (realloc if needed).
+static bool ensure_dec_buf(uint8_t **buf, size_t *cap, size_t need, bool input) {
+  if (*buf != nullptr && *cap >= need)
+    return true;
+  if (*buf != nullptr) {
+    free(*buf);
+    *buf = nullptr;
+    *cap = 0;
+  }
+  jpeg_decode_memory_alloc_cfg_t cfg = {};
+  cfg.buffer_direction = input ? JPEG_DEC_ALLOC_INPUT_BUFFER : JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  size_t got = 0;
+  *buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(need, &cfg, &got));
+  *cap = (*buf != nullptr) ? (got ? got : need) : 0;
+  return *buf != nullptr;
 }
 
 void Face2Face::jpeg_deinit_() {
