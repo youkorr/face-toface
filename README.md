@@ -75,10 +75,15 @@ components/face2face/
   face2face.h      # protocole UDP + classe Component
   face2face.cpp    # UDP + JPEG matériel + caméra + audio
 example/
+  standalone-facetime.yaml      # CONFIG COMPLÈTE prête à flasher (carte vierge)
   face2face-snippet.yaml        # face2face seul (vidéo + audio intégré)
-  face2face-with-intercom.yaml  # RECOMMANDÉ : vidéo face2face + audio/appel intercom
+  face2face-with-intercom.yaml  # vidéo face2face + audio/appel intercom
   lvgl-call-page.yaml           # page d'appel LVGL 9.5 moderne (1024x600) + présence
 ```
+
+> ✅ La page d'appel, le composant face2face, l'intercom et la présence sont déjà
+> **fusionnés** dans votre `waveshare (3).yaml` (page LVGL `call_page`). L'exemple
+> autonome `example/standalone-facetime.yaml` est une config minimale séparée.
 
 ## 4bis. Présence : « l'autre est-il connecté ? »
 

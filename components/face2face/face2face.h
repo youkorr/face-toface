@@ -104,8 +104,10 @@ class Face2Face : public Component {
 
   // ---- Remote video access (pushed to an LVGL canvas by a YAML lambda) ----
   const uint8_t *remote_rgb565() const { return remote_fb_.empty() ? nullptr : remote_fb_.data(); }
-  uint16_t remote_width() const { return width_; }
-  uint16_t remote_height() const { return height_; }
+  // Actual dimensions of the last decoded remote frame (falls back to the
+  // configured size before the first frame arrives).
+  uint16_t remote_width() const { return remote_w_ ? remote_w_ : width_; }
+  uint16_t remote_height() const { return remote_h_ ? remote_h_ : height_; }
   bool has_new_remote_frame() {
     bool v = new_remote_frame_;
     new_remote_frame_ = false;
@@ -164,6 +166,8 @@ class Face2Face : public Component {
   FrameAssembler audio_asm_;
 
   std::vector<uint8_t> remote_fb_;  // decoded remote frame, RGB565
+  uint16_t remote_w_{0};            // dims of the last decoded remote frame
+  uint16_t remote_h_{0};
   bool new_remote_frame_{false};
 
   // hardware JPEG handles + DMA buffers (opaque; cast in .cpp)

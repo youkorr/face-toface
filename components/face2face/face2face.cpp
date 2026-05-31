@@ -358,6 +358,11 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   if (jpeg_decoder_get_info(dec_in_, len, &info) != ESP_OK)
     return false;
 
+  // Frame must fit the DMA output buffer we allocated (width_/height_ = max).
+  size_t want = (size_t) info.width * info.height * 2;
+  if (want == 0 || want > dec_out_cap_)
+    return false;
+
   jpeg_decode_cfg_t cfg = {};
   cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
   cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
@@ -367,8 +372,10 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
                            dec_out_cap_, &out_len) != ESP_OK)
     return false;
 
-  // Copy into the public RGB565 framebuffer the YAML lambda reads.
-  size_t want = (size_t) width_ * height_ * 2;
+  // Resolution-agnostic: expose whatever size the peer actually sent so the
+  // LVGL canvas can size itself via remote_width()/remote_height().
+  remote_w_ = info.width;
+  remote_h_ = info.height;
   size_t n = out_len < want ? out_len : want;
   if (remote_fb_.size() != want)
     remote_fb_.assign(want, 0);
