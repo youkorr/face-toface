@@ -258,11 +258,15 @@ face2face:
     # Libère le micro pour l'appel : coupe wake-word + assistant vocal.
     - micro_wake_word.stop:
     - voice_assistant.stop:
+    # Libère la caméra : le preview local camera_display consomme les 2 buffers,
+    # sinon face2face logge "get_current_rgb_frame: no buffer available".
+    - lambda: "id(camera_display)->set_enabled(false);"
     - lvgl.widget.hide: incoming_overlay
     - lvgl.page.show: call_page
   on_idle:
-    # Fin d'appel : ré-arme la détection de mot d'éveil.
+    # Fin d'appel : ré-arme la détection de mot d'éveil + le preview local.
     - micro_wake_word.start:
+    - lambda: "id(camera_display)->set_enabled(true);"
     - lvgl.widget.hide: incoming_overlay
 
 
