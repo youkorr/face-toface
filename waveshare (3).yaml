@@ -127,8 +127,12 @@ esp32:
   #engineering_sample: true
   framework:
     type: esp-idf
-    #components:
-      #- espressif/esp_hosted==2.12.8 
+    # Force esp-dsp 1.7.0 for the whole project (FINAL priority => overrides the
+    # 1.7.1 pin a component adds). Aligns esp-sr (AEC, v2.3.0) and esp-dl
+    # (face_detection, ==1.7.0) on a single esp-dsp version. Resolves the
+    # "Version solving failed" conflict (esp-dsp issue #113).
+    components:
+      - espressif/esp-dsp==1.7.0
     #version: 5.5.2
     #platform_version: 55.03.35
     advanced:
