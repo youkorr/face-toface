@@ -1,149 +1,120 @@
 # face-toface
 
-Communication vidéo + audio en **peer-to-peer (IP directe)**, façon FaceTime,
-entre **deux ESP32-P4**, sous **ESPHome / Home Assistant**, avec caméra
-**OV5647 (MIPI-CSI)**, affichage **MIPI-DSI + LVGL 9.5**, et codec **MJPEG
-matériel**.
+Appel **vidéo + audio en peer-to-peer (IP directe, UDP)**, façon FaceTime, entre
+**deux ESP32-P4** sous **ESPHome / Home Assistant**.
 
-> ⚠️ **État : squelette fonctionnel + points d'intégration matériels à câbler.**
-> La couche réseau (sockets UDP, fragmentation/réassemblage JPEG, glue ESPHome,
-> rendu LVGL) est écrite et complète. Les appels aux codecs/capture **matériels**
-> d'Espressif (`esp_capture`, JPEG hardware, `esp_codec_dev`) sont balisés comme
-> « Integration point » dans `face2face.cpp` et doivent être finalisés/testés
-> **sur la carte** (impossible à compiler/tester hors matériel ESP32-P4).
+Conçu pour s'intégrer à **votre** stack Waveshare existante :
+- caméra **OV5647** via votre composant `esp_cam_sensor` (`tab5_cam`)
+- micro **ES7210** (`esp32_microphone`) + HP **ES8311** (`esp32_speaker`)
+- affichage **MIPI-DSI + LVGL 9.5** (canvas)
+- codec **JPEG matériel** natif du P4 (`esp_driver_jpeg`)
+
+> ⚠️ **État : composant complet, à valider sur carte.** La logique réseau
+> (UDP, fragmentation/réassemblage), l'intégration caméra (`get_current_rgb_frame`),
+> micro/HP (callbacks ESPHome) et le pipeline JPEG matériel sont écrits avec les
+> vraies API. Je **ne peux pas compiler du firmware P4 ici** : prévoyez 1-2
+> itérations sur le matériel, notamment pour les noms d'enums `esp_driver_jpeg`
+> qui varient légèrement selon la version d'ESP-IDF (voir §6).
 
 ---
 
-## 1. Pourquoi pas « tout en YAML » ?
-
-ESPHome n'a **aucun** composant natif de streaming/appel vidéo. La solution est
-donc un **composant externe C++** (`components/face2face/`) que l'on **configure
-ensuite en YAML** — exactement le modèle utilisé par `esp_video` lui-même.
-Vous gardez donc une config 100 % YAML côté utilisateur.
-
-## 2. Le matériel s'y prête (vérifié)
-
-| Brique | ESP32-P4 | Composant utilisé |
-|---|---|---|
-| Caméra OV5647 MIPI-CSI | ISP + V4L2 | `esp_video` (déjà OK chez vous) |
-| Encodage MJPEG | **JPEG matériel** (720p@88fps / 1080p@34fps) | `esp_capture` |
-| Décodage MJPEG | **JPEG matériel** (720p@88fps) | `esp_video_codec` |
-| Audio I2S (mic + HP) | I2S + codec | `esp_codec_dev` |
-| Affichage | MIPI-DSI | `lvgl` (ESPHome) |
-
-> 💡 Le P4 a **aussi** un encodeur **H.264 matériel** *et* un décodeur H.264
-> (`esp_h264`). On commence en **MJPEG** car encode **et** décode sont matériels,
-> sans état entre images → très tolérant aux pertes UDP. Passage à H.264 possible
-> plus tard (meilleure bande passante, gestion des I-frames à coder).
-
-## 3. Architecture
+## 1. Le flux (chaque carte fait les deux sens)
 
 ```
-   CARTE A                          réseau                      CARTE B
- ┌─────────────────────────┐                          ┌─────────────────────────┐
- │ OV5647 ──► esp_video     │                          │ OV5647 ──► esp_video     │
- │   (V4L2 MIPI-CSI)        │                          │   (V4L2 MIPI-CSI)        │
- │        │                 │                          │        │                 │
- │   esp_capture            │   UDP :9000 (vidéo)      │   esp_capture            │
- │   ├─ MJPEG enc (HW) ─────┼───────────────────────►  │   ├─ JPEG dec (HW) ──►   │
- │   └─ audio enc ──────────┼───────────────────────►  │   └─ audio dec ──► I2S HP │
- │                          │   UDP :9001 (audio)      │                          │
- │   JPEG dec (HW) ◄────────┼───────────────────────   │   MJPEG enc (HW) ◄─────── │
- │        │                 │                          │                          │
- │   LVGL canvas (RGB565)   │                          │   LVGL canvas (RGB565)   │
- └─────────────────────────┘                          └─────────────────────────┘
+  ÉMISSION (TX)                                   RÉCEPTION (RX)
+  ┌──────────────────────────┐                    ┌──────────────────────────┐
+  │ tab5_cam (OV5647)         │                    │  UDP :9000 (vidéo)        │
+  │  get_current_rgb_frame()  │                    │   réassemblage JPEG       │
+  │        │ RGB565           │                    │        │                  │
+  │  JPEG enc MATÉRIEL  ──────┼── UDP :9000 ──►     │  JPEG dec MATÉRIEL        │
+  │        │ JPEG             │                     │        │ RGB565           │
+  │  sendto(peer)             │                     │  remote_rgb565()          │
+  │                           │                     │        │ (lambda YAML)    │
+  │ esp32_microphone          │                     │  lv_canvas_set_buffer     │
+  │  callback PCM 16k ────────┼── UDP :9001 ──►      │  ──► LVGL canvas          │
+  │                           │   (audio)            │                          │
+  │ speaker.play() ◄──────────┼── UDP :9001 ───      │  micro du pair            │
+  └──────────────────────────┘                     └──────────────────────────┘
 ```
 
-### Protocole sur le fil (UDP)
+- **Vidéo** : RGB565 (caméra) → **JPEG matériel** → UDP. À la réception :
+  réassemblage → **JPEG matériel** → RGB565 → canvas LVGL. MJPEG = sans état
+  entre images, donc une image perdue est simplement sautée (latence faible).
+- **Audio** : PCM 16 bit / 16 kHz mono brut sur UDP (~32 ko/s). Le micro ESPHome
+  pousse les blocs via callback ; on les rejoue sur le speaker du pair.
 
-Chaque image JPEG / bloc audio est **fragmenté** en paquets ≤ 1400 octets
-(pour éviter la fragmentation IP). En-tête `F2FHeader` (voir `face2face.h`) :
+## 2. Pourquoi un composant custom (et pas `camera_web_server`)
 
-```
-magic(4) stream(1) flags(1) frame_id(2) frag_index(2) frag_count(2)
-frame_size(4) payload_len(2)  | payload...
-```
+`camera_web_server` (MJPEG over HTTP/TCP) ne tient pas bien la charge en temps
+réel. `face2face` envoie le JPEG en **UDP** directement au pair : pas de serveur,
+pas de TCP, latence minimale, et on saute les images perdues au lieu de bloquer.
 
-Le récepteur réassemble par `(stream, frame_id)`, décode l'image complète, et
-abandonne les images partielles d'un `frame_id` plus ancien → **latence faible**,
-robuste aux pertes (on saute simplement l'image perdue, pas de blocage).
+## 3. Protocole sur le fil (UDP)
+
+Chaque image JPEG / bloc audio est **fragmenté** en paquets ≤ 1400 o. En-tête
+`F2FHeader` (`face2face.h`) : `magic, stream, flags, frame_id, frag_index,
+frag_count, frame_size, payload_len`. Le récepteur réassemble par
+`(stream, frame_id)` et abandonne les fragments d'un `frame_id` plus ancien.
 
 ## 4. Fichiers
 
 ```
 components/face2face/
-  __init__.py      # schéma YAML + pull des managed components Espressif
+  __init__.py      # schéma YAML, refs caméra/micro/HP
   face2face.h      # protocole UDP + classe Component
-  face2face.cpp    # réseau/réassemblage (complet) + codecs (à câbler)
+  face2face.cpp    # UDP + JPEG matériel + caméra + audio
 example/
-  face2face-device.yaml   # config des deux cartes (changez peer_ip)
+  face2face-snippet.yaml   # à coller dans votre waveshare.yaml
 ```
 
-## 5. Configuration YAML
+## 5. Intégration YAML
+
+Voir `example/face2face-snippet.yaml`. L'essentiel :
 
 ```yaml
-external_components:
-  - source: { type: local, path: ../components }
-
 face2face:
   id: f2f
-  peer_ip: "192.168.1.51"   # IP de l'autre carte
-  video_port: 9000
-  audio_port: 9001
+  peer_ip: "192.168.1.51"     # IP de l'autre carte
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: media_resampling_speaker   # resampler 16k -> 48k
   width: 640
   height: 480
   framerate: 15
-  jpeg_quality: 80
-  enable_audio: true
-  audio_sample_rate: 16000
+  jpeg_quality: 40
 ```
 
-Contrôle de l'appel (depuis un bouton HA ou un widget LVGL) :
+Affichage : un widget `canvas` (`id: remote_video`) + un `interval` qui appelle
+`lv_canvas_set_buffer(...)` avec `id(f2f).remote_rgb565()`. Self-view local : votre
+`lvgl_camera_display` existant sur un petit canvas.
 
-```yaml
-button:
-  - platform: template
-    name: "Appeler"
-    on_press: { lambda: "id(f2f).start_call();" }
-  - platform: template
-    name: "Raccrocher"
-    on_press: { lambda: "id(f2f).stop_call();" }
-```
+## 6. À valider / ajuster sur carte
 
-Affichage de l'image distante dans un `canvas` LVGL : voir le bloc `interval:`
-dans `example/face2face-device.yaml`.
+1. **`width`/`height`** doivent correspondre à la sortie RGB de `tab5_cam`
+   (vous êtes en `800x800` ; mettez la même chose ou ajoutez un redimensionnement).
+2. **Enums `esp_driver_jpeg`** : selon votre ESP-IDF, vérifiez les noms exacts
+   dans `driver/jpeg_encode.h` / `driver/jpeg_decode.h` :
+   `JPEG_ENCODE_IN_FORMAT_RGB565`, `JPEG_DOWN_SAMPLING_YUV420`,
+   `JPEG_DECODE_OUT_FORMAT_RGB565`, `JPEG_DEC_RGB_ELEMENT_ORDER_RGB`,
+   `JPEG_ENC_ALLOC_INPUT_BUFFER`, etc.
+3. **Speaker** : `media_resampling_speaker` (sortie 48 kHz) accepte le PCM 16 kHz
+   via `set_audio_stream_info(16, 1, 16000)`. Si l'audio est trop rapide/lent,
+   c'est ce mapping qu'il faut ajuster.
+4. **Débit** : à 640x480@15fps q=40, comptez ~3-6 Mbps. Si saccades, baissez
+   `framerate`, la résolution ou `jpeg_quality`.
+5. **WiFi via ESP-Hosted (C6)** : les deux cartes sur le même LAN.
 
-## 6. Réseau : l'ESP32-P4 n'a pas de WiFi
+## 7. Pistes d'évolution
 
-Le P4 est **sans radio**. Pour l'IP il faut :
-- l'**Ethernet** de la carte d'éval (utilisé dans l'exemple), ou
-- un co-processeur **ESP32-C6/C5** en **ESP-Hosted** (`wifi:` via SDIO).
-
-Les deux cartes doivent être sur le **même réseau** (IP directe P2P).
-
-## 7. Ce qu'il reste à finaliser (sur carte)
-
-Dans `face2face.cpp`, remplacez les corps marqués `// === Integration point ===` :
-
-1. **`capture_init_` / `pump_tx_`** — pipeline `esp_capture` : source V4L2
-   (OV5647) + source audio I2S, sink MJPEG + audio, `acquire_frame`/`release_frame`.
-2. **`decoder_init_` / `decode_jpeg_`** — décodeur JPEG matériel → RGB565.
-3. **`audio_init_` / `audio_play_`** — `esp_codec_dev` pour la sortie HP.
-4. Ajustez les **refs de versions** des managed components dans `__init__.py`
-   à ce qui existe au moment du build (registry Espressif).
-
-## 8. Alternative « production » : ESP-WebRTC
-
-Espressif fournit `esp-webrtc-solution` (composant `esp_peer`) avec une démo
-**peer-to-peer entre deux ESP32-P4** (audio + vidéo, signalisation incluse).
-C'est plus lourd (pile WebRTC, VP8/H.264/Opus) mais c'est la voie si vous voulez
-traverser des réseaux/NAT plus tard. Le présent projet privilégie la simplicité
-(MJPEG + UDP direct) pour démarrer vite sur LAN.
+- **H.264** au lieu de MJPEG (votre `CONFIG_ESP_H264_DUAL_TASK` est déjà activé) :
+  meilleur débit, mais gestion des I-frames sur UDP à coder.
+- **Logique d'appel** (sonnerie, décrocher/raccrocher, état occupé) côté LVGL.
+- **Découverte** via Home Assistant au lieu d'IP codée en dur.
+- Alternative « production » longue distance : `esp-webrtc-solution` (composant
+  `esp_peer`, démo P2P deux ESP32-P4) — pile WebRTC complète, traverse les NAT.
 
 ## Sources
 
-- ESP32-P4 codecs JPEG/H.264 : <https://components.espressif.com/components/espressif/esp_h264>, <https://developer.espressif.com/blog/2025/07/esp-h264-use-tips/>
-- ESP-GMF / esp_capture : <https://github.com/espressif/esp-gmf>
-- esp_video_codec : <https://components.espressif.com/components/espressif/esp_video_codec>
-- esp-webrtc-solution (peer P2P P4) : <https://github.com/espressif/esp-webrtc-solution>
-- OV5647 MIPI-CSI sur P4 (UVC/MJPEG) : <https://github.com/r4d10n/esp32p4-uvc-video>
+- Codec JPEG matériel P4 (`esp_driver_jpeg`) : ESP-IDF `components/esp_driver_jpeg`
+- esp-webrtc-solution (P2P P4) : <https://github.com/espressif/esp-webrtc-solution>
+- Vos composants : <https://github.com/youkorr/test2_esp_video_esphome>, <https://github.com/youkorr/lvgl_9.5>
