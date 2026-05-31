@@ -14,9 +14,9 @@
 #include "esphome/components/audio/audio.h"
 
 // ESP32-P4 hardware JPEG codec (built-in IDF component esp_driver_jpeg).
-// NOTE: a few enum/field names below may differ slightly between IDF versions
-// (5.3 / 5.4 / 5.5). If the build complains, check driver/jpeg_encode.h and
-// driver/jpeg_decode.h in *your* installed ESP-IDF and adjust the names.
+// NOTE: a few enum/field names below may differ slightly between IDF versions.
+// If the build complains, check driver/jpeg_encode.h and driver/jpeg_decode.h
+// in *your* installed ESP-IDF and adjust the names.
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
@@ -54,8 +54,6 @@ void Face2Face::setup() {
     return;
   }
 
-  // Microphone delivers raw PCM via a callback; we only forward it while a
-  // call is active.
   if (audio_enabled_ && mic_ != nullptr) {
     mic_->add_data_callback([this](const std::vector<uint8_t> &data) { this->on_mic_data_(data); });
   }
@@ -71,15 +69,27 @@ void Face2Face::loop() {
 
   poll_receive_();
 
-  // Heartbeat: advertise our presence to the peer once per second, even when
-  // no call is active, so each side can tell whether the other is reachable.
   uint32_t now_ms = millis();
+
+  // Heartbeat (presence), even when idle.
   if (now_ms - last_ping_tx_ms_ >= 1000) {
     last_ping_tx_ms_ = now_ms;
     send_ping_();
   }
 
-  if (in_call_ && jpeg_ready_ && camera_ != nullptr) {
+  // Ring/dial timeout: give up if the peer never answers.
+  if ((state_ == STATE_OUTGOING || state_ == STATE_RINGING) &&
+      (now_ms - state_since_ms_) > ring_timeout_ms_) {
+    ESP_LOGI(TAG, "Call setup timed out");
+    if (state_ == STATE_OUTGOING)
+      send_ctrl_(CTRL_HANGUP);
+    else
+      send_ctrl_(CTRL_DECLINE);
+    go_idle_();
+  }
+
+  // Send our video while streaming, rate-limited to framerate_.
+  if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
     uint32_t now = micros();
     uint32_t period = 1000000UL / framerate_;
     if (now - last_tx_us_ >= period) {
@@ -95,39 +105,147 @@ void Face2Face::dump_config() {
   ESP_LOGCONFIG(TAG, "  Video: %ux%u @ %u fps, JPEG q=%u", width_, height_, framerate_, jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Audio: %s @ %u Hz  (mic:%s spk:%s)", YESNO(audio_enabled_), audio_sample_rate_,
                 mic_ ? "yes" : "no", spk_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  Ring timeout: %u ms, auto-answer: %s", ring_timeout_ms_, YESNO(auto_answer_));
 }
 
 // ===========================================================================
-// Call control
+// Call FSM  (native signaling — replaces the external intercom)
 // ===========================================================================
-void Face2Face::start_call() {
-  if (in_call_)
+void Face2Face::set_state_(CallState s) {
+  if (state_ == s)
     return;
-  ESP_LOGI(TAG, "Starting call to %s", peer_ip_.c_str());
+  state_ = s;
+  state_since_ms_ = millis();
+}
+
+void Face2Face::call() {
+  if (state_ != STATE_IDLE) {
+    ESP_LOGW(TAG, "call() ignored: not idle (state=%d)", state_);
+    return;
+  }
+  ESP_LOGI(TAG, "Calling %s ...", peer_ip_.c_str());
+  set_state_(STATE_OUTGOING);
+  send_ctrl_(CTRL_CALL);
+  if (on_outgoing_ != nullptr)
+    on_outgoing_->trigger();
+}
+
+void Face2Face::answer() {
+  if (state_ != STATE_RINGING) {
+    ESP_LOGW(TAG, "answer() ignored: not ringing");
+    return;
+  }
+  ESP_LOGI(TAG, "Answering call");
+  send_ctrl_(CTRL_ANSWER);
+  start_streaming_();
+}
+
+void Face2Face::decline() {
+  if (state_ != STATE_RINGING)
+    return;
+  ESP_LOGI(TAG, "Declining call");
+  send_ctrl_(CTRL_DECLINE);
+  go_idle_();
+}
+
+void Face2Face::hangup() {
+  if (state_ == STATE_IDLE)
+    return;
+  ESP_LOGI(TAG, "Hanging up");
+  send_ctrl_(CTRL_HANGUP);
+  go_idle_();
+}
+
+void Face2Face::start_streaming_() {
+  set_state_(STATE_STREAMING);
   if (camera_ != nullptr && !camera_->is_streaming())
     camera_->start_streaming();
   if (audio_enabled_) {
     if (spk_ != nullptr)
       spk_->start();
-    if (mic_ != nullptr && !mic_->is_running())
+    if (mic_ != nullptr && !mic_->is_running()) {
       mic_->start();
+      mic_started_ = true;
+    }
   }
-  in_call_ = true;
+  ESP_LOGI(TAG, "Call established (streaming)");
+  if (on_streaming_ != nullptr)
+    on_streaming_->trigger();
 }
 
-void Face2Face::stop_call() {
-  if (!in_call_)
-    return;
-  ESP_LOGI(TAG, "Stopping call");
-  in_call_ = false;
+void Face2Face::go_idle_() {
+  bool was_active = (state_ != STATE_IDLE);
+  set_state_(STATE_IDLE);
   if (audio_enabled_) {
-    if (mic_ != nullptr && mic_->is_running())
+    if (mic_ != nullptr && mic_started_) {
       mic_->stop();
+      mic_started_ = false;
+    }
     if (spk_ != nullptr)
       spk_->stop();
   }
-  // Camera is left streaming so the local self-view keeps working; call
-  // camera_->stop_streaming() here if you want it off between calls.
+  // Camera left streaming so a local self-view keeps working between calls.
+  if (was_active && on_idle_ != nullptr)
+    on_idle_->trigger();
+}
+
+void Face2Face::on_ctrl_(uint8_t type) {
+  switch (type) {
+    case CTRL_CALL:
+      if (state_ == STATE_IDLE) {
+        set_state_(STATE_RINGING);
+        send_ctrl_(CTRL_RING);  // tell caller we are presenting the call
+        ESP_LOGI(TAG, "Incoming call");
+        if (on_ringing_ != nullptr)
+          on_ringing_->trigger();
+        if (auto_answer_)
+          answer();
+      } else if (state_ == STATE_STREAMING) {
+        // Already in a call with this peer: re-ack to be safe.
+        send_ctrl_(CTRL_ANSWER);
+      }
+      break;
+    case CTRL_RING:
+      // Provisional ringback; UI may already show "calling".
+      break;
+    case CTRL_ANSWER:
+      if (state_ == STATE_OUTGOING)
+        start_streaming_();
+      break;
+    case CTRL_HANGUP:
+      if (state_ != STATE_IDLE)
+        go_idle_();
+      break;
+    case CTRL_DECLINE:
+      if (state_ == STATE_OUTGOING) {
+        ESP_LOGI(TAG, "Call declined by peer");
+        go_idle_();
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void Face2Face::send_ctrl_(F2FCtrl type) {
+  struct sockaddr_in dst {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(video_port_);  // control rides the video/control port
+  ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
+
+  uint8_t pkt[F2F_HEADER_SIZE + 1];
+  auto *hdr = reinterpret_cast<F2FHeader *>(pkt);
+  *hdr = F2FHeader{};
+  hdr->magic = F2F_MAGIC;
+  hdr->stream = F2F_STREAM_CTRL;
+  hdr->flags = F2F_FLAG_LAST;
+  hdr->frag_count = 1;
+  hdr->frame_size = 1;
+  hdr->payload_len = 1;
+  pkt[F2F_HEADER_SIZE] = (uint8_t) type;
+  // UDP control is best-effort; send a few copies so setup survives loss.
+  for (int i = 0; i < 4; i++)
+    ::sendto(video_sock_, pkt, sizeof(pkt), 0, (struct sockaddr *) &dst, sizeof(dst));
 }
 
 // ===========================================================================
@@ -158,6 +276,19 @@ bool Face2Face::open_sockets_() {
   }
   sockets_ready_ = true;
   return true;
+}
+
+void Face2Face::send_ping_() {
+  struct sockaddr_in dst {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(video_port_);
+  ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
+  F2FHeader h{};
+  h.magic = F2F_MAGIC;
+  h.stream = F2F_STREAM_PING;
+  h.flags = F2F_FLAG_LAST;
+  h.frag_count = 1;
+  ::sendto(video_sock_, &h, sizeof(h), 0, (struct sockaddr *) &dst, sizeof(dst));
 }
 
 void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len, int sock) {
@@ -194,19 +325,6 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
   }
 }
 
-void Face2Face::send_ping_() {
-  struct sockaddr_in dst {};
-  dst.sin_family = AF_INET;
-  dst.sin_port = htons(video_port_);
-  ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
-  F2FHeader h{};
-  h.magic = F2F_MAGIC;
-  h.stream = F2F_STREAM_PING;
-  h.flags = F2F_FLAG_LAST;
-  h.frag_count = 1;
-  ::sendto(video_sock_, &h, sizeof(h), 0, (struct sockaddr *) &dst, sizeof(dst));
-}
-
 void Face2Face::poll_receive_() {
   uint8_t buf[F2F_HEADER_SIZE + F2F_MAX_PAYLOAD];
   for (int i = 0; i < 64; i++) {
@@ -235,8 +353,14 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
     return;
   // Any valid packet from the peer counts as presence.
   last_peer_rx_ms_ = millis();
+
   if (hdr->stream == F2F_STREAM_PING)
-    return;  // heartbeat only, nothing else to do
+    return;
+  if (hdr->stream == F2F_STREAM_CTRL) {
+    if (hdr->payload_len >= 1 && F2F_HEADER_SIZE + 1 <= len)
+      on_ctrl_(buf[F2F_HEADER_SIZE]);
+    return;
+  }
   if (hdr->stream != expected)
     return;
   if (F2F_HEADER_SIZE + hdr->payload_len > len)
@@ -275,37 +399,32 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
 // Hardware JPEG codec (esp_driver_jpeg)
 // ===========================================================================
 bool Face2Face::jpeg_init_() {
-  // --- Encoder ---
   jpeg_encode_engine_cfg_t enc_eng = {};
   enc_eng.timeout_ms = 70;
   if (jpeg_new_encoder_engine(&enc_eng, reinterpret_cast<jpeg_encoder_handle_t *>(&jpeg_enc_)) != ESP_OK) {
     ESP_LOGE(TAG, "jpeg_new_encoder_engine failed");
     return false;
   }
-  // Encoder input: RGB565 frame (DMA-capable, aligned).
   size_t in_size = (size_t) width_ * height_ * 2;
   jpeg_encode_memory_alloc_cfg_t in_cfg = {};
   in_cfg.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER;
   size_t in_alloc = 0;
   enc_in_ = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(in_size, &in_cfg, &in_alloc));
-  // Encoder output: compressed JPEG scratch (worst case ~ raw/2 is plenty).
   jpeg_encode_memory_alloc_cfg_t out_cfg = {};
   out_cfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
-  enc_out_cap_ = in_size;  // generous
+  enc_out_cap_ = in_size;
   enc_out_ = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(enc_out_cap_, &out_cfg, &enc_out_cap_));
 
-  // --- Decoder ---
   jpeg_decode_engine_cfg_t dec_eng = {};
   dec_eng.timeout_ms = 40;
   if (jpeg_new_decoder_engine(&dec_eng, reinterpret_cast<jpeg_decoder_handle_t *>(&jpeg_dec_)) != ESP_OK) {
     ESP_LOGE(TAG, "jpeg_new_decoder_engine failed");
     return false;
   }
-  // Decoder input: incoming JPEG (DMA-capable). Decoder output: RGB565.
   jpeg_decode_memory_alloc_cfg_t din_cfg = {};
   din_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
   size_t din_alloc = 0;
-  dec_in_cap_ = in_size;  // a JPEG is always smaller than the raw frame
+  dec_in_cap_ = in_size;
   dec_in_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(dec_in_cap_, &din_cfg, &din_alloc));
   jpeg_decode_memory_alloc_cfg_t dout_cfg = {};
   dout_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
@@ -328,7 +447,6 @@ void Face2Face::pump_video_tx_() {
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
-  // Copy the RGB565 frame into the DMA-capable encoder input buffer.
   size_t frame_bytes = (size_t) w * h * 2;
   if (frame_bytes <= (size_t) width_ * height_ * 2) {
     std::memcpy(enc_in_, rgb, frame_bytes);
@@ -358,7 +476,6 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   if (jpeg_decoder_get_info(dec_in_, len, &info) != ESP_OK)
     return false;
 
-  // Frame must fit the DMA output buffer we allocated (width_/height_ = max).
   size_t want = (size_t) info.width * info.height * 2;
   if (want == 0 || want > dec_out_cap_)
     return false;
@@ -372,8 +489,6 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
                            dec_out_cap_, &out_len) != ESP_OK)
     return false;
 
-  // Resolution-agnostic: expose whatever size the peer actually sent so the
-  // LVGL canvas can size itself via remote_width()/remote_height().
   remote_w_ = info.width;
   remote_h_ = info.height;
   size_t n = out_len < want ? out_len : want;
@@ -387,15 +502,14 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
 // Audio (ESPHome microphone -> UDP -> speaker)
 // ===========================================================================
 void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
-  if (!in_call_ || data.empty())
+  if (state_ != STATE_STREAMING || data.empty())
     return;
   send_frame_(F2F_STREAM_AUDIO, data.data(), data.size(), audio_sock_);
 }
 
 void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
-  if (spk_ == nullptr || len == 0)
+  if (spk_ == nullptr || len == 0 || state_ != STATE_STREAMING)
     return;
-  // Best-effort: drop the chunk if the speaker buffer is momentarily full.
   spk_->play(pcm, len);
 }
 

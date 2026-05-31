@@ -5,23 +5,36 @@
 # boutons d'appel) + écran "appel entrant". Présence = heartbeat UDP de
 # face2face (on sait si l'autre carte est connectée, même hors appel).
 #
-# À fusionner dans votre waveshare.yaml (qui a déjà display + lvgl + intercom).
+# À fusionner dans votre waveshare.yaml (qui a déjà display + lvgl).
 # Camera réglée en 1024x600 pour remplir l'écran (voir esp_cam_sensor ci-dessous).
 # =============================================================================
 
 # --- 1) Caméra en 1024x600 pour un rendu plein écran ------------------------
 # (Dans votre bloc esp_cam_sensor existant, mettez :)
 #   resolution: "1024x600"
-# et faites correspondre face2face :
+# et faites correspondre face2face (vidéo + audio + appel, tout natif) :
 face2face:
   id: f2f
   peer_ip: "192.168.1.51"
   camera_id: tab5_cam
-  enable_audio: false            # audio géré par l'intercom
+  microphone_id: esp32_microphone
+  speaker_id: media_resampling_speaker
+  enable_audio: true
+  ring_timeout: 30s
   width: 1024
   height: 600
   framerate: 12                  # 1024x600 = lourd ; montez si le WiFi suit
   jpeg_quality: 35
+  on_ringing:
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
+  on_streaming:
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+  on_idle:
+    - lvgl.widget.hide: incoming_overlay
 
 # --- 2) Présence exposée à Home Assistant -----------------------------------
 binary_sensor:
@@ -52,18 +65,9 @@ interval:
               lv_color_hex(on ? 0x22C55E : 0x64748B), 0);
           lv_label_set_text(id(presence_label), on ? "En ligne" : "Hors ligne");
 
-# --- 4) Synchronisation appel <-> vidéo (sur les événements intercom) --------
-# (à ajouter dans votre bloc intercom_api existant)
-#   on_streaming:
-#     - lambda: "id(f2f).start_call();"
-#     - lvgl.widget.hide: incoming_overlay
-#     - lvgl.page.show: call_page
-#   on_ringing:
-#     - lvgl.widget.show: incoming_overlay
-#     - lvgl.page.show: call_page
-#   on_idle:
-#     - lambda: "id(f2f).stop_call();"
-#     - lvgl.widget.hide: incoming_overlay
+# --- 4) Synchronisation appel <-> page : gérée par les triggers de face2face
+#        (déjà déclarés dans le bloc face2face ci-dessus : on_ringing /
+#         on_outgoing_call / on_streaming / on_idle).
 
 # --- 5) La page d'appel (à ajouter sous lvgl: -> pages:) ---------------------
 lvgl:
@@ -165,7 +169,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.call_contact: { id: intercom, contact: "Salon" }
+                    - face2face.call: f2f
               - button:        # Raccrocher (rouge)
                   id: btn_hangup
                   align: RIGHT_MID
@@ -180,7 +184,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.hangup_call: intercom
+                    - face2face.hangup: f2f
 
         # ---- Overlay "Appel entrant" (caché par défaut) ----
         - obj:
@@ -217,7 +221,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.answer_call: intercom
+                    - face2face.answer: f2f
                     - lvgl.widget.hide: incoming_overlay
               - button:        # Refuser (rouge)
                   align: CENTER
@@ -230,7 +234,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.decline_call: intercom
+                    - face2face.decline: f2f
                     - lvgl.widget.hide: incoming_overlay
 
 # -----------------------------------------------------------------------------

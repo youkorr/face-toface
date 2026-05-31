@@ -36,17 +36,24 @@ face2face:
   jpeg_quality: 40               # 30-50 = bon compromis débit/qualité sur WiFi
   enable_audio: true
   audio_sample_rate: 16000       # = sample_rate de esp32_microphone
+  ring_timeout: 30s
+  # auto_answer: true            # décrocher automatiquement (interphone)
 
 # 3) Boutons d'appel (apparaissent aussi dans Home Assistant)
+#    Signalisation native : call / answer / decline / hangup.
 button:
   - platform: template
     name: "Appeler"
     on_press:
-      - lambda: "id(f2f).start_call();"
+      - face2face.call: f2f
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - face2face.answer: f2f
   - platform: template
     name: "Raccrocher"
     on_press:
-      - lambda: "id(f2f).stop_call();"
+      - face2face.hangup: f2f
 
 # 4) Pousser l'image distante décodée (RGB565) dans un canvas LVGL.
 #    Ajoutez un widget `canvas` (id: remote_video) à la bonne taille dans une de

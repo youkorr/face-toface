@@ -1,13 +1,13 @@
 # =============================================================================
 # EXEMPLE AUTONOME — FaceTime entre deux ESP32-P4 (Waveshare 7B 1024x600)
 # -----------------------------------------------------------------------------
-# Config minimale et complète : caméra OV5647 + audio I2S + écran + page d'appel
-# LVGL + face2face (vidéo) + intercom (audio/appel) + présence.
+# Tout-en-un avec le SEUL composant face2face : vidéo (JPEG matériel/UDP),
+# audio (mic/HP I2S) ET logique d'appel (sonnerie/décrocher/raccrocher).
+# Aucune dépendance externe de type intercom.
 #
-# Flashez ce fichier sur les DEUX cartes ; changez juste le bloc substitutions.
-#   Carte A : device_ip 192.168.1.50 / peer_ip 192.168.1.51
-#   Carte B : device_ip 192.168.1.51 / peer_ip 192.168.1.50
-# Les pins correspondent à la Waveshare ESP32-P4-WIFI6-TOUCH-LCD-7B.
+# Flashez sur les DEUX cartes ; changez juste le bloc substitutions.
+#   Carte A : peer_ip 192.168.1.51   Carte B : peer_ip 192.168.1.50
+# Pins = Waveshare ESP32-P4-WIFI6-TOUCH-LCD-7B.
 # =============================================================================
 
 substitutions:
@@ -44,7 +44,6 @@ api:
 ota:
   - platform: esphome
 
-# WiFi via le co-processeur ESP-Hosted (ESP32-C6). Les deux cartes sur le même LAN.
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -75,12 +74,7 @@ external_components:
       ref: claude/esp32p4-video-communication-W0yEc
     components: [face2face]
     refresh: always
-  - source: github://n-IA-hane/esphome-intercom
-    ref: main
-    components: [intercom_api]
-    refresh: always
 
-# --- Bus I2C (capteur caméra + codecs audio) --------------------------------
 i2c:
   - id: bsp_bus
     sda: GPIO07
@@ -103,7 +97,7 @@ esp_cam_sensor:
   id: tab5_cam
   i2c_id: bsp_bus
   sensor_type: ov5647
-  resolution: "640x480"          # 4:3, bon compromis pour l'appel
+  resolution: "640x480"
   framerate: 30
   jpeg_quality: 15
 
@@ -150,43 +144,31 @@ speaker:
     sample_rate: 48000
     bits_per_sample: 16
 
-# --- VIDÉO P2P (face2face) --------------------------------------------------
+# --- FaceTime : vidéo + audio + appel, tout natif ---------------------------
 face2face:
   id: f2f
   peer_ip: ${peer_ip}
   camera_id: tab5_cam
-  enable_audio: false
+  microphone_id: esp32_microphone
+  speaker_id: media_resampling_speaker
+  enable_audio: true
+  audio_sample_rate: 16000
+  ring_timeout: 30s
   width: 640
   height: 480
   framerate: 15
   jpeg_quality: 40
-
-# --- AUDIO + signalisation d'appel (intercom) -------------------------------
-intercom_api:
-  id: intercom
-  microphone: esp32_microphone
-  speaker: media_resampling_speaker
-  buffers_in_psram: true
-  ringing_timeout: 30s
-  on_boot:
-    priority: -100
-    then:
-      - intercom_api.flush_contacts: { id: intercom }
-      - intercom_api.set_contacts:
-          id: intercom
-          contacts_csv: "${peer_name}|tcp|${peer_ip}|6054"
   on_ringing:
     - lvgl.widget.show: incoming_overlay
     - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
   on_streaming:
-    - lambda: "id(f2f).start_call();"
     - lvgl.widget.hide: incoming_overlay
     - lvgl.page.show: call_page
   on_idle:
-    - lambda: "id(f2f).stop_call();"
     - lvgl.widget.hide: incoming_overlay
 
-# --- Présence (heartbeat) ---------------------------------------------------
 binary_sensor:
   - platform: template
     name: "Pair connecté"
@@ -194,18 +176,20 @@ binary_sensor:
     device_class: connectivity
     lambda: "return id(f2f).peer_online();"
 
-# --- Boutons d'appel --------------------------------------------------------
 button:
   - platform: template
     name: "Appeler ${peer_name}"
     on_press:
-      - intercom_api.call_contact: { id: intercom, contact: "${peer_name}" }
+      - face2face.call: f2f
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - face2face.answer: f2f
   - platform: template
     name: "Raccrocher"
     on_press:
-      - intercom_api.hangup_call: intercom
+      - face2face.hangup: f2f
 
-# --- Boucle vidéo + présence ------------------------------------------------
 interval:
   - interval: 66ms
     then:
@@ -224,7 +208,6 @@ interval:
               lv_color_hex(on ? 0x22C55E : 0x64748B), 0);
           lv_label_set_text(id(presence_label), on ? "En ligne" : "Hors ligne");
 
-# --- Écran MIPI-DSI ---------------------------------------------------------
 display:
   - platform: mipi_dsi
     id: main_display
@@ -235,7 +218,6 @@ display:
     auto_clear_enabled: false
     dimensions: { width: 1024, height: 600 }
 
-# --- LVGL : page d'appel ----------------------------------------------------
 lvgl:
   color_depth: 16
   byte_order: little_endian
@@ -302,7 +284,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.call_contact: { id: intercom, contact: "${peer_name}" }
+                    - face2face.call: f2f
               - button:
                   align: RIGHT_MID
                   x: -16
@@ -313,7 +295,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.hangup_call: intercom
+                    - face2face.hangup: f2f
         - obj:
             id: incoming_overlay
             hidden: true
@@ -348,7 +330,7 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e90a", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.answer_call: intercom
+                    - face2face.answer: f2f
                     - lvgl.widget.hide: incoming_overlay
               - button:
                   align: CENTER
@@ -361,5 +343,5 @@ lvgl:
                   widgets:
                     - label: { align: CENTER, text: "\U0000e909", text_font: montserrat_28, text_color: 0xFFFFFF }
                   on_click:
-                    - intercom_api.decline_call: intercom
+                    - face2face.decline: f2f
                     - lvgl.widget.hide: incoming_overlay

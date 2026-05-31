@@ -42,17 +42,36 @@ Conçu pour s'intégrer à **votre** stack Waveshare existante :
   entre images, donc une image perdue est simplement sautée (latence faible).
 - **Audio** : PCM 16 bit / 16 kHz mono brut sur UDP (~32 ko/s). Le micro ESPHome
   pousse les blocs via callback ; on les rejoue sur le speaker du pair.
+- **Signalisation d'appel** : **native, intégrée à face2face** (aucune dépendance
+  externe). Messages de contrôle UDP `CALL/RING/ANSWER/HANGUP/DECLINE` + machine
+  à états `IDLE → OUTGOING/RINGING → STREAMING`.
 
-> 💡 **Recommandé pour l'audio + la logique d'appel : `esphome-intercom`.**
-> Le composant [`intercom_api`](https://github.com/n-IA-hane/esphome-intercom)
-> fait déjà exactement le même audio (PCM 16k/16-bit mono sur vos microphone/speaker)
-> **et** ajoute toute la signalisation d'appel (carnet d'adresses P2P en
-> `device_independent`, sonnerie, décrocher/raccrocher, états `on_ringing` /
-> `on_streaming` / `on_idle`). On câble alors `face2face` en **vidéo seule**
-> (`enable_audio: false`) et on démarre/arrête la vidéo sur les événements de
-> l'intercom. Voir `example/face2face-with-intercom.yaml` — c'est l'architecture
-> conseillée. L'audio intégré de `face2face` reste disponible pour un usage
-> autonome (sans appel/sonnerie).
+### Signalisation d'appel (absorbée de l'intercom, sans en dépendre)
+
+L'ancienne version reposait sur l'external `esphome-intercom`. Ce qui était bon
+(audio PCM 16k/16-bit mono, FSM d'appel, états) a été **réimplémenté nativement**
+dans `face2face`, puis la dépendance a été **supprimée**.
+
+**Actions** (pour boutons HA / clics LVGL) :
+
+```yaml
+on_press:
+  - face2face.call: f2f      # appeler le pair
+  - face2face.answer: f2f    # décrocher
+  - face2face.hangup: f2f    # raccrocher / annuler
+  - face2face.decline: f2f   # refuser
+```
+
+**Triggers** (déclarés dans le bloc `face2face:`) :
+`on_ringing`, `on_outgoing_call`, `on_streaming`, `on_idle`
+(+ option `auto_answer: true` pour un mode interphone, `ring_timeout`).
+
+> 🔊 **Écho (AEC).** Sans annulation d'écho, en mains-libres le micro réémet le son
+> du HP. Pour un vrai haut-parleur, ajoutez l'AEC d'Espressif **ESP-SR** (`esp_aec`,
+> 16 kHz, `AEC_MODE_SR_LOW_COST`, buffers `int16` alignés 16 o) : comme votre
+> référence vient d'un codec externe (ES8311/ES7210), c'est de l'**AEC matériel**.
+> Non inclus par défaut pour rester sans dépendance ; voir §7. En attendant :
+> casque/oreillette ou push-to-talk évitent l'écho.
 
 ## 2. Pourquoi un composant custom (et pas `camera_web_server`)
 
@@ -76,14 +95,14 @@ components/face2face/
   face2face.cpp    # UDP + JPEG matériel + caméra + audio
 example/
   standalone-facetime.yaml      # CONFIG COMPLÈTE prête à flasher (carte vierge)
-  face2face-snippet.yaml        # face2face seul (vidéo + audio intégré)
-  face2face-with-intercom.yaml  # vidéo face2face + audio/appel intercom
+  face2face-snippet.yaml        # bloc face2face (vidéo + audio + appel) à coller
   lvgl-call-page.yaml           # page d'appel LVGL 9.5 moderne (1024x600) + présence
 ```
 
-> ✅ La page d'appel, le composant face2face, l'intercom et la présence sont déjà
-> **fusionnés** dans votre `waveshare (3).yaml` (page LVGL `call_page`). L'exemple
-> autonome `example/standalone-facetime.yaml` est une config minimale séparée.
+> ✅ Le composant face2face (vidéo + audio + appel), la page d'appel et la présence
+> sont déjà **fusionnés** dans votre `waveshare (3).yaml` (page LVGL `call_page`),
+> **sans aucune dépendance intercom**. `example/standalone-facetime.yaml` est une
+> config minimale séparée et complète.
 
 ## 4bis. Présence : « l'autre est-il connecté ? »
 
@@ -137,15 +156,19 @@ Affichage : un widget `canvas` (`id: remote_video`) + un `interval` qui appelle
 
 ## 7. Pistes d'évolution
 
+- **AEC (annulation d'écho)** pour le mains-libres : intégrer **ESP-SR** `esp_aec`
+  dans `on_mic_data_` avant l'envoi (16 kHz, `AEC_MODE_SR_LOW_COST`, filter
+  length 4, buffers `int16` alignés 16 o via `heap_caps_aligned_alloc`). La
+  référence (sortie HP) venant d'un codec externe (ES8311/ES7210) → AEC matériel.
+  Gate l'AEC quand le HP a joué dans les ~250 ms.
 - **H.264** au lieu de MJPEG (votre `CONFIG_ESP_H264_DUAL_TASK` est déjà activé) :
   meilleur débit, mais gestion des I-frames sur UDP à coder.
-- **Logique d'appel** (sonnerie, décrocher/raccrocher, état occupé) côté LVGL.
+- **Jitter buffer audio** (petit tampon de ré-ordonnancement) pour lisser le réseau.
 - **Découverte** via Home Assistant au lieu d'IP codée en dur.
-- Alternative « production » longue distance : `esp-webrtc-solution` (composant
-  `esp_peer`, démo P2P deux ESP32-P4) — pile WebRTC complète, traverse les NAT.
 
 ## Sources
 
 - Codec JPEG matériel P4 (`esp_driver_jpeg`) : ESP-IDF `components/esp_driver_jpeg`
-- esp-webrtc-solution (P2P P4) : <https://github.com/espressif/esp-webrtc-solution>
+- AEC ESP-SR : <https://docs.espressif.com/projects/esp-sr/en/latest/esp32p4/audio_front_end/README.html>
+- Protocole repris (puis réimplémenté) de : <https://github.com/n-IA-hane/esphome-intercom>
 - Vos composants : <https://github.com/youkorr/test2_esp_video_esphome>, <https://github.com/youkorr/lvgl_9.5>
