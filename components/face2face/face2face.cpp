@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 
 #include <cstring>
+#include <cstdlib>
 
 // lwIP / POSIX sockets (ESP-IDF)
 #include <lwip/sockets.h>
@@ -53,23 +54,18 @@ void Face2Face::setup() {
     this->mark_failed();
     return;
   }
-  remote_fb_.assign((size_t) width_ * height_ * 2, 0);
-
-  if (!jpeg_init_()) {
-    ESP_LOGE(TAG, "JPEG hardware codec init failed");
-    this->mark_failed();
-    return;
-  }
-
+  // Heavy media buffers (hardware JPEG codec, RGB framebuffer, AEC) are NOT
+  // allocated here. They are created lazily in ensure_media_() when a call
+  // starts and freed in release_media_() on hangup, so almost no RAM/PSRAM is
+  // used while idle on the LVGL UI.
   if (audio_enabled_ && mic_ != nullptr) {
     mic_->add_data_callback([this](const std::vector<uint8_t> &data) { this->on_mic_data_(data); });
   }
   if (audio_enabled_ && spk_ != nullptr) {
     spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
   }
-  if (audio_enabled_ && aec_enabled_)
-    aec_init_();
-  ESP_LOGCONFIG(TAG, "face2face ready (peer=%s v:%u a:%u)", peer_ip_.c_str(), video_port_, audio_port_);
+  ESP_LOGCONFIG(TAG, "face2face ready (peer=%s v:%u a:%u) - media allocated per-call",
+                peer_ip_.c_str(), video_port_, audio_port_);
 }
 
 void Face2Face::loop() {
@@ -114,7 +110,7 @@ void Face2Face::dump_config() {
   ESP_LOGCONFIG(TAG, "  Video: %ux%u @ %u fps, JPEG q=%u", width_, height_, framerate_, jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Audio: %s @ %u Hz  (mic:%s spk:%s)", YESNO(audio_enabled_), audio_sample_rate_,
                 mic_ ? "yes" : "no", spk_ ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "  AEC: %s", aec_ready_ ? "active" : (aec_enabled_ ? "enabled (not ready)" : "off"));
+  ESP_LOGCONFIG(TAG, "  AEC: %s (allocated per-call)", aec_enabled_ ? "enabled" : "off");
   ESP_LOGCONFIG(TAG, "  Ring timeout: %u ms, auto-answer: %s", ring_timeout_ms_, YESNO(auto_answer_));
 }
 
@@ -167,13 +163,22 @@ void Face2Face::hangup() {
 }
 
 void Face2Face::start_streaming_() {
+  // Allocate the heavy media buffers now (freed again on hangup).
+  if (!ensure_media_()) {
+    ESP_LOGE(TAG, "Cannot start call: media allocation failed (low memory?)");
+    send_ctrl_(CTRL_HANGUP);
+    go_idle_();
+    return;
+  }
   set_state_(STATE_STREAMING);
   // Fire on_streaming first so YAML can stop wake-word / voice_assistant and
   // release the microphone *before* we start capturing it ourselves.
   if (on_streaming_ != nullptr)
     on_streaming_->trigger();
-  if (camera_ != nullptr && !camera_->is_streaming())
+  if (camera_ != nullptr && !camera_->is_streaming()) {
     camera_->start_streaming();
+    camera_started_ = true;
+  }
   if (audio_enabled_) {
     if (spk_ != nullptr)
       spk_->start();
@@ -196,7 +201,13 @@ void Face2Face::go_idle_() {
     if (spk_ != nullptr)
       spk_->stop();
   }
-  // Camera left streaming so a local self-view keeps working between calls.
+  // Stop the camera if WE started it (frees its DMA frame buffers).
+  if (camera_started_ && camera_ != nullptr) {
+    camera_->stop_streaming();
+    camera_started_ = false;
+  }
+  // Free the JPEG codec, framebuffer and AEC buffers (~several MB of PSRAM).
+  release_media_();
   if (was_active && on_idle_ != nullptr)
     on_idle_->trigger();
 }
@@ -452,6 +463,46 @@ bool Face2Face::jpeg_init_() {
   return true;
 }
 
+void Face2Face::jpeg_deinit_() {
+  if (jpeg_enc_ != nullptr) {
+    jpeg_del_encoder_engine(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_));
+    jpeg_enc_ = nullptr;
+  }
+  if (jpeg_dec_ != nullptr) {
+    jpeg_del_decoder_engine(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_));
+    jpeg_dec_ = nullptr;
+  }
+  if (enc_in_ != nullptr) { free(enc_in_); enc_in_ = nullptr; }
+  if (enc_out_ != nullptr) { free(enc_out_); enc_out_ = nullptr; }
+  if (dec_in_ != nullptr) { free(dec_in_); dec_in_ = nullptr; }
+  if (dec_out_ != nullptr) { free(dec_out_); dec_out_ = nullptr; }
+  jpeg_ready_ = false;
+}
+
+// Allocate the per-call media buffers (idempotent).
+bool Face2Face::ensure_media_() {
+  if (jpeg_ready_)
+    return true;
+  if (!jpeg_init_())
+    return false;
+  remote_fb_.assign((size_t) width_ * height_ * 2, 0);
+  if (audio_enabled_ && aec_enabled_)
+    aec_init_();  // best-effort; passes through raw audio if it fails
+  return true;
+}
+
+// Free everything allocated by ensure_media_ so idle RAM/PSRAM use is minimal.
+void Face2Face::release_media_() {
+  jpeg_deinit_();
+  aec_deinit_();
+  std::vector<uint8_t>().swap(remote_fb_);  // release capacity, not just size
+  remote_w_ = 0;
+  remote_h_ = 0;
+  new_remote_frame_ = false;
+  video_asm_ = FrameAssembler{};
+  audio_asm_ = FrameAssembler{};
+}
+
 void Face2Face::pump_video_tx_() {
   esp_cam_sensor::SimpleBufferElement *el = nullptr;
   uint8_t *rgb = nullptr;
@@ -552,6 +603,26 @@ bool Face2Face::aec_init_() {
   ESP_LOGW(TAG, "AEC requested but not compiled in (enable_aec pulls esp-sr)");
   return false;
 #endif
+}
+
+void Face2Face::aec_deinit_() {
+#ifdef FACE2FACE_USE_AEC
+  if (aec_handle_ != nullptr) {
+    aec_destroy(static_cast<aec_handle_t *>(aec_handle_));
+    aec_handle_ = nullptr;
+  }
+  if (aec_in_ != nullptr) { free(aec_in_); aec_in_ = nullptr; }
+  if (aec_ref_ != nullptr) { free(aec_ref_); aec_ref_ = nullptr; }
+  if (aec_out_ != nullptr) { free(aec_out_); aec_out_ = nullptr; }
+#endif
+  std::vector<int16_t>().swap(mic_acc_);
+  std::vector<int16_t>().swap(send_acc_);
+  std::vector<int16_t>().swap(ref_buf_);
+  ref_cap_ = 0;
+  ref_head_ = 0;
+  ref_count_ = 0;
+  aec_chunk_ = 0;
+  aec_ready_ = false;
 }
 
 void Face2Face::ref_push_(const int16_t *d, size_t n) {

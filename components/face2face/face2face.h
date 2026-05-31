@@ -159,8 +159,14 @@ class Face2Face : public Component {
 
   // hardware JPEG codec
   bool jpeg_init_();
+  void jpeg_deinit_();
   void pump_video_tx_();
   bool decode_jpeg_(const uint8_t *jpeg, uint32_t len);
+
+  // lazy media resources: allocated on call start, freed on hangup so RAM/PSRAM
+  // stay free while idle on the LVGL UI.
+  bool ensure_media_();
+  void release_media_();
 
   // audio
   void on_mic_data_(const std::vector<uint8_t> &data);
@@ -168,6 +174,7 @@ class Face2Face : public Component {
 
   // acoustic echo cancellation (ESP-SR esp_aec)
   bool aec_init_();
+  void aec_deinit_();
   void ref_push_(const int16_t *d, size_t n);  // store far-end (speaker) samples
   void ref_pop_(int16_t *d, size_t n);         // fetch time-aligned reference
 
@@ -186,6 +193,8 @@ class Face2Face : public Component {
   bool aec_enabled_{true};
   int aec_filter_length_{4};
   int aec_mode_{4};  // AEC_MODE_VOIP_HIGH_PERF
+
+  bool camera_started_{false};  // did we start camera streaming for this call?
 
   // peers
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
