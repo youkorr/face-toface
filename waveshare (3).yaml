@@ -449,7 +449,7 @@ esp_cam_sensor:
   id: tab5_cam
   i2c_id: bsp_bus
   sensor_type: ov5647        #"sensor_type" au lieu de "sensor"
-  resolution: "800x800"          #"1920x1080"  #"800x800"   #"1280x960"    #"800x640"          # , 1024x600 ,vga
+  resolution: "640x480"          # VGA : soulage CPU/PSRAM pour l'appel vidéo + s'aligne sur camera_canvas (640x480). #"800x800" #"1920x1080"
   framerate: 30
   jpeg_quality: 15
   mirror_x: false    # Flip horizontal (hardware)
@@ -2936,9 +2936,9 @@ face2face:
   enable_aec: true
   aec_mode: voip_high_perf
   aec_filter_length: 4
-  width: 800                     # borne mémoire = sortie caméra (800x800)
-  height: 800
-  framerate: 12
+  width: 640                     # borne mémoire = sortie caméra (640x480)
+  height: 480
+  framerate: 15
   jpeg_quality: 35
   on_ringing:
     - lvgl.widget.show: incoming_overlay
@@ -3314,8 +3314,8 @@ lvgl:
           - canvas:
               id: remote_video
               align: CENTER
-              width: 800
-              height: 600
+              width: 640
+              height: 480
 
           # Barre de statut translucide (haut)
           - obj:
