@@ -121,9 +121,16 @@ async def to_code(config):
 
     # Acoustic echo cancellation: pull Espressif ESP-SR and compile the AEC path
     # only when enabled (keeps the component dependency-free otherwise).
+    #
+    # Pin esp-sr to v2.3.0 (commit d0eaa31), which depends on esp-dsp 1.7.0 -- the
+    # SAME version your esp-dl / face_detection requires (==1.7.0). esp-sr master
+    # bumps esp-dsp to 1.8.0, which conflicts with esp-dl and breaks dependency
+    # solving (see esp-dsp issue #113). 1.7.0 already has the ESP32-P4 AEC kernels.
     if config[CONF_ENABLE_AEC]:
         esp32.add_idf_component(
-            name="esp-sr", repo="https://github.com/espressif/esp-sr", ref="master"
+            name="esp-sr",
+            repo="https://github.com/espressif/esp-sr",
+            ref="d0eaa31d7912ade2f40eda9890e18ae240d887cb",
         )
         cg.add_define("FACE2FACE_USE_AEC")
 
