@@ -76,7 +76,7 @@ def _trigger():
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(Face2Face),
-        cv.Required(CONF_PEER_IP): cv.ipv4address,
+        cv.Optional(CONF_PEER_IP, default="0.0.0.0"): cv.ipv4address,
         cv.Required(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
         cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),

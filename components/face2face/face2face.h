@@ -94,7 +94,13 @@ class Face2Face : public Component {
   float get_setup_priority() const override;
 
   // ---- YAML setters ----
-  void set_peer_ip(const std::string &ip) { peer_ip_ = ip; }
+  // Safe to call at runtime (e.g. from a Home Assistant text entity). Ignores
+  // an empty value so a blank field never wipes a working address.
+  void set_peer_ip(const std::string &ip) {
+    if (!ip.empty())
+      peer_ip_ = ip;
+  }
+  std::string get_peer_ip() const { return peer_ip_; }
   void set_video_port(uint16_t p) { video_port_ = p; }
   void set_audio_port(uint16_t p) { audio_port_ = p; }
   void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }

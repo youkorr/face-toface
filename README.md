@@ -134,10 +134,33 @@ verte/grise dans la barre de statut LVGL (voir `example/lvgl-call-page.yaml`).
 
 Voir `example/face2face-snippet.yaml`. L'essentiel :
 
+### IP du correspondant (`peer_ip`)
+
+`peer_ip` = l'IP de l'**autre** carte (le correspondant), pas la sienne. Elle est
+**optionnelle** dans le YAML : le plus pratique est de la saisir depuis **Home
+Assistant** via une entité `text` (mémorisée au reboot), qui met l'IP à jour à
+chaud sans recompiler :
+
+```yaml
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    mode: text
+    optimistic: true
+    restore_value: true            # persiste après reboot
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
+```
+
+`id(f2f).set_peer_ip(...)` est sûr à chaud (ignore une valeur vide). Donnez à
+chaque carte une IP fixe et saisissez l'IP de l'autre dans ce champ.
+
 ```yaml
 face2face:
   id: f2f
-  peer_ip: "192.168.1.51"     # IP de l'autre carte
+  # peer_ip: "192.168.1.51"   # facultatif : sinon défini via le texte HA
   camera_id: tab5_cam
   microphone_id: esp32_microphone
   speaker_id: media_resampling_speaker   # resampler 16k -> 48k
