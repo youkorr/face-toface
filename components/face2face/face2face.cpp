@@ -811,6 +811,11 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
 void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
   if (spk_ == nullptr || len == 0 || state_ != STATE_STREAMING)
     return;
+  // Only feed the speaker once its I2S driver is actually RUNNING. On a shared
+  // I2S bus the speaker can fail to start ("Parent bus is busy"); pushing PCM
+  // into a non-started speaker pipeline corrupts its buffers -> crash on hangup.
+  if (!spk_->is_running())
+    return;
 #ifdef FACE2FACE_USE_AEC
   // The far-end audio we are about to play is the echo reference for the mic.
   if (aec_ready_)
