@@ -259,6 +259,7 @@ class Face2Face : public Component {
   size_t ref_cap_{0};
   size_t ref_head_{0};
   size_t ref_count_{0};
+  uint32_t last_spk_ms_{0};  // last time the speaker played (AEC gating)
 
   // hardware JPEG handles + DMA buffers
   void *jpeg_enc_{nullptr};

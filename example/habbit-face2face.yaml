@@ -33,7 +33,7 @@ face2face:
   ring_timeout: 30s
   audio_start_delay: 1500ms  # délai avant mic+HP (montez à 2500ms si "bus busy")
   enable_aec: true
-  aec_mode: voip_high_perf
+  aec_mode: sr_low_cost      # recommandé par Espressif : préserve le wake-word
   aec_filter_length: 4
   on_ringing:
     - lvgl.widget.show: incoming_overlay

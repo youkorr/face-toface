@@ -769,7 +769,13 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
     return;
 
 #ifdef FACE2FACE_USE_AEC
-  if (aec_ready_) {
+  // AEC gating (as recommended by Espressif/esp-sr): only run echo cancellation
+  // when the speaker actually played within the last 250ms. When the far end is
+  // silent there is no echo to cancel, and running the adaptive filter on pure
+  // near-end speech makes it drift and can hurt the wake word. So bypass AEC
+  // and send the raw mic when the speaker has been idle.
+  bool spk_recent = (last_spk_ms_ != 0) && (millis() - last_spk_ms_ < 250);
+  if (aec_ready_ && spk_recent) {
     const int16_t *in = reinterpret_cast<const int16_t *>(data.data());
     mic_acc_.insert(mic_acc_.end(), in, in + data.size() / 2);
     send_acc_.clear();
@@ -788,6 +794,9 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
                   send_acc_.size() * sizeof(int16_t), audio_sock_);
     return;
   }
+  // Speaker idle: keep the mic accumulator/reference from going stale.
+  if (!mic_acc_.empty())
+    mic_acc_.clear();
 #endif
   send_frame_(F2F_STREAM_AUDIO, data.data(), data.size(), audio_sock_);
 }
@@ -799,6 +808,7 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
   // The far-end audio we are about to play is the echo reference for the mic.
   if (aec_ready_)
     ref_push_(reinterpret_cast<const int16_t *>(pcm), len / 2);
+  last_spk_ms_ = millis();  // mark speaker activity for AEC gating
 #endif
   spk_->play(pcm, len);
 }

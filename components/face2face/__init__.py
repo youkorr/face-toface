@@ -96,7 +96,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_RING_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_AUTO_ANSWER, default=False): cv.boolean,
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
-        cv.Optional(CONF_AEC_MODE, default="voip_high_perf"): cv.enum(AEC_MODES, lower=True),
+        cv.Optional(CONF_AEC_MODE, default="sr_low_cost"): cv.enum(AEC_MODES, lower=True),
         cv.Optional(CONF_AEC_FILTER_LENGTH, default=4): cv.int_range(min=1, max=8),
         cv.Optional(CONF_AUDIO_START_DELAY, default="1500ms"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ON_RINGING): _trigger(),
