@@ -1,25 +1,31 @@
 # =============================================================================
-# AUDIO FULL-DUPLEX pour WAVESHARE ESP32-P4 7B — via esp_audio_stack
+# AUDIO FULL-DUPLEX — WAVESHARE ESP32-P4 7B — via esp_audio_stack
 # -----------------------------------------------------------------------------
 # RÉSOUT le "Parent bus is busy" : micro + HP partagent un seul bus I2S, et
-# ESPHome interdit 2 composants i2s_audio actifs dessus simultanément. La
-# solution (de n-IA-hane/esphome-intercom v2026.6.0) = esp_audio_stack : UN seul
-# driver qui possède le bus I2S en full-duplex et expose microphone + speaker.
-# Bonus : référence d'écho MATÉRIELLE (AEC propre) via TDM.
+# ESPHome interdit 2 composants i2s_audio actifs dessus simultanément (le HP
+# ne démarre jamais pendant un appel). Solution (n-IA-hane/esphome-intercom
+# v2026.6.0) : esp_audio_stack = UN seul driver qui possède le bus I2S en
+# full-duplex et expose microphone + speaker STANDARDS + AEC matérielle (TDM).
 #
-# ⚠️ REMPLACE vos blocs existants : i2s_audio / audio_dac / audio_adc /
-#    microphone / speaker. Garde les MÊMES pins (GPIO10/12/13/11/9) et codecs
-#    (ES7210@0x40, ES8311@0x18) que votre waveshare.yaml.
+# ✅ COMPATIBLE AVEC VOTRE STACK VA : esp_audio_stack fournit un microphone et
+#    un speaker ESPHome normaux. En gardant les MÊMES ids (esp32_microphone /
+#    esp32_speaker), toute votre chaîne reste INCHANGÉE :
+#       mixer / resampler / media_player / voice_assistant / micro_wake_word
+#    s'empilent par-dessus exactement comme avant.
 #
-# Pins vérifiés identiques à votre config Waveshare P4 7B.
+# ⚠️ CE QUE VOUS REMPLACEZ dans waveshare.yaml (UNIQUEMENT ces blocs) :
+#       - i2s_audio:        (tout le bloc)
+#       - audio_dac:        (es8311)
+#       - audio_adc:        (es7210)
+#       - microphone: -> le SEUL item "platform: i2s_audio" (esp32_microphone)
+#       - speaker:    -> le SEUL item "platform: i2s_audio" (esp32_speaker)
+#    GARDEZ les blocs mixer/resampler/media_player/voice_assistant/mWW tels quels.
 # =============================================================================
 
 external_components:
-  # esp_audio_stack (+ AEC matérielle) depuis esphome-intercom v2026.6.0
   - source: github://n-IA-hane/esphome-intercom@v2026.6.0
     components: [esp_audio_stack, esp_afe, audio_processor]
     refresh: always
-  # face2face (vidéo + appel)
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
@@ -27,13 +33,11 @@ external_components:
     components: [face2face]
     refresh: always
 
-# --- Front-end audio (AEC matérielle) ---------------------------------------
+# Front-end audio (AEC matérielle). Voir le repo pour les options NS/VAD/AGC.
 audio_processor:
   - id: afe_processor
-    # AEC seule (sans wake-word interne) ; mettez aec_only selon l'API du repo.
-    # Voir les YAML du repo pour les options exactes (NS/VAD/AGC).
 
-# --- UN SEUL driver I2S full-duplex (remplace i2s_audio/dac/adc/mic/speaker) -
+# --- UN SEUL driver I2S full-duplex (remplace i2s_audio + dac + adc) ---------
 esp_audio_stack:
   id: audio_stack
   audio_task_stack_in_psram: true
@@ -46,7 +50,7 @@ esp_audio_stack:
   output_sample_rate: 16000
   processor_id: afe_processor
   codec:
-    i2c_id: bsp_bus            # votre bus I2C existant (SDA7/SCL8)
+    i2c_id: bsp_bus              # votre bus I2C existant (SDA7/SCL8)
     input:
       type: es7210
       address: 0x40
@@ -60,15 +64,18 @@ esp_audio_stack:
       use_mclk: true
       no_dac_ref: true
   slot_bit_width: 16
-  use_tdm_reference: true       # référence d'écho matérielle via TDM
+  use_tdm_reference: true        # référence d'écho MATÉRIELLE (AEC propre)
   tdm_total_slots: 4
   tdm_mic_slots: [0, 2]
   tdm_ref_slot: 1
   buffers_in_psram: true
 
+# --- mic + HP exposés par le stack, MÊMES ids qu'avant ----------------------
+# => votre mixer / resampler / media_player / voice_assistant marchent sans
+#    modification (ils référencent esp32_microphone et esp32_speaker).
 microphone:
   - platform: esp_audio_stack
-    id: esp32_microphone        # garde le même id pour le reste de votre YAML
+    id: esp32_microphone
     esp_audio_stack_id: audio_stack
 
 speaker:
@@ -77,18 +84,23 @@ speaker:
     esp_audio_stack_id: audio_stack
     sample_rate: 48000
 
-# --- face2face : audio géré par esp_audio_stack -----------------------------
-# Comme esp_audio_stack fait DÉJÀ l'AEC matérielle, on DÉSACTIVE l'AEC logicielle
-# de face2face (enable_aec: false) pour ne pas annuler l'écho deux fois.
+  # >>> GARDEZ vos blocs existants tels quels juste après <<< :
+  # - platform: mixer        (mixing_speaker -> output_speaker: esp32_speaker)
+  # - platform: resampler    (announcement_resampling_speaker / media_resampling_speaker)
+
+# --- face2face : audio géré par le stack (AEC matérielle) -------------------
+# enable_aec: false car esp_audio_stack fait DÉJÀ l'AEC matérielle (ne pas la
+# faire deux fois). Le HP de l'appel : utilisez media_resampling_speaker comme
+# avant (il s'empile sur esp32_speaker).
 face2face:
   id: f2f
   camera_id: tab5_cam
   microphone_id: esp32_microphone
-  speaker_id: esp32_speaker
+  speaker_id: media_resampling_speaker
   enable_audio: true
   audio_sample_rate: 16000
-  enable_aec: false             # AEC déléguée à esp_audio_stack (matérielle)
-  audio_start_delay: 300ms      # plus besoin d'attendre : un seul driver de bus
+  enable_aec: false              # AEC déléguée au matériel (esp_audio_stack)
+  audio_start_delay: 300ms       # un seul driver de bus -> plus de "bus busy"
   scale: 2
   jpeg_quality: 35
   framerate: 12
@@ -109,9 +121,9 @@ face2face:
     - lvgl.widget.hide: incoming_overlay
 
 # -----------------------------------------------------------------------------
-# NOTE : les champs exacts d'audio_processor / esp_audio_stack peuvent varier
-# selon la version du repo. En cas d'erreur de validation, copiez le bloc
-# correspondant depuis l'exemple officiel le plus proche de votre carte :
+# IMPORTANT : les champs exacts d'esp_audio_stack / audio_processor peuvent
+# varier selon la version. En cas d'erreur de validation, copiez le bloc depuis
+# l'exemple officiel de VOTRE carte :
 #   yamls/full-experience/single-bus/waveshare-p4-touch-full-afe-udp-landscape.yaml
-# (https://github.com/n-IA-hane/esphome-intercom)
+#   (https://github.com/n-IA-hane/esphome-intercom)
 # -----------------------------------------------------------------------------
