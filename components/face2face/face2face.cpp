@@ -347,14 +347,15 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
       sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
       if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
         retries++;
-        vTaskDelay(1); // wait 1 tick for TX buffer to drain
+        // Wait 2ms to let WiFi driver transmit and free up some TX buffers
+        vTaskDelay(pdMS_TO_TICKS(2));
       } else {
         break;
       }
-    } while (retries < 20);
+    } while (retries < 50);
 
     if (sent < 0) {
-      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d", errno);
+      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d, retries %d", errno, retries);
       break; // Abort sending the rest of this frame
     }
   }
@@ -744,3 +745,4 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
 
 }  // namespace face2face
 }  // namespace esphome
+
