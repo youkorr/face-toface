@@ -323,15 +323,29 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     hdr->payload_len = plen;
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
     
-    int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-    if (sent < 0 && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "sendto failed: errno %d", errno);
-      break; // Note from assistant: This break drops the frame if ENOBUFS occurs!
-    }
+    int sent;
+    do {
+      sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+      if (sent < 0) {
+        if (errno == EWOULDBLOCK || errno == ENOBUFS) {
+          if (millis() - start_ms > 100) {
+            ESP_LOGW(TAG, "Network stalled > 100ms, dropping frame");
+            return; // Abort this frame to prevent freezing ESPHome
+          }
+          vTaskDelay(1);
+          continue; // Retry sending this fragment
+        } else {
+          ESP_LOGW(TAG, "sendto failed: errno %d", errno);
+          return; // Fatal error
+        }
+      }
+      break; // Fragment sent successfully
+    } while (true);
 
-    // FIX: Tiny micro-pause to prevent the WiFi driver from returning EWOULDBLOCK
-    // and dropping the frame (does not freeze ESPHome).
-    if ((f % 8) == 7) {
+    // FIX: Stronger pacing (1ms pause every 4 packets instead of 8)
+    // This allows the massive 150KB JPEG to flow smoothly over the ESP32 WiFi
+    // without filling up the TX buffer and triggering ENOBUFS.
+    if ((f % 4) == 3) {
       vTaskDelay(1);
     }
   }
