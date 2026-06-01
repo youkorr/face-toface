@@ -558,8 +558,8 @@ void Face2Face::pump_video_tx_() {
     std::memcpy(enc_in_, rgb, frame_bytes);
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
-    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
-    cfg.image_quality = jpeg_quality_;
+    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV444; // QUALITÉ COULEUR MAXIMALE (au lieu de YUV420)
+    cfg.image_quality = 95; // QUALITÉ MAXIMALE FORCÉE (au lieu de jpeg_quality_ à 40)
     cfg.width = w;
     cfg.height = h;
     uint32_t out_size = 0;
@@ -747,6 +747,7 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
 
 }  // namespace face2face
 }  // namespace esphome
+
 
 
 
