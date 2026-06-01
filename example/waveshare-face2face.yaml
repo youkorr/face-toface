@@ -1,0 +1,97 @@
+# =============================================================================
+# face2face — bloc pour WAVESHARE ESP32-P4 7B (OV5647 + ES8311/ES7210)
+# -----------------------------------------------------------------------------
+# À fusionner dans votre waveshare.yaml. Reprend vos ids existants :
+#   caméra: tab5_cam | micro: esp32_microphone | HP: media_resampling_speaker
+# Le HP passe par le resampler 48 kHz existant ; face2face lui annonce du 16k.
+# =============================================================================
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [face2face]
+    refresh: always
+
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: media_resampling_speaker
+  enable_audio: true
+  audio_sample_rate: 16000
+  # --- Vidéo : downscale pour tenir sur le WiFi-over-SDIO ---
+  # OV5647 sort en 800x800. scale 2 -> 400x400 (quelques Ko/image).
+  scale: 2
+  jpeg_quality: 35
+  framerate: 12
+  swap_colors: true
+  # --- Audio / appel ---
+  ring_timeout: 30s
+  audio_start_delay: 1500ms
+  enable_aec: true
+  aec_mode: voip_high_perf
+  aec_filter_length: 4
+  on_ringing:
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
+  on_streaming:
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
+    - lambda: "id(camera_display)->set_enabled(false);"
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+  on_idle:
+    - lambda: "id(camera_display)->set_enabled(true);"
+    - micro_wake_word.start:
+    - lvgl.widget.hide: incoming_overlay
+
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    icon: "mdi:ip-network"
+    mode: text
+    optimistic: true
+    restore_value: true
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
+
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+button:
+  - platform: template
+    name: "Appeler"
+    on_press: [ face2face.call: f2f ]
+  - platform: template
+    name: "Décrocher"
+    on_press: [ face2face.answer: f2f ]
+  - platform: template
+    name: "Raccrocher"
+    on_press: [ face2face.hangup: f2f ]
+
+interval:
+  - interval: 80ms
+    then:
+      - lambda: |-
+          if (id(f2f).has_new_remote_frame()) {
+            const uint8_t *rgb = id(f2f).remote_rgb565();
+            if (rgb != nullptr) {
+              lv_canvas_set_buffer(id(remote_video), (void*)rgb,
+                  id(f2f).remote_width(), id(f2f).remote_height(),
+                  LV_COLOR_FORMAT_RGB565);
+              lv_obj_invalidate(id(remote_video));
+            }
+          }
+          bool on = id(f2f).peer_online();
+          lv_obj_set_style_bg_color(id(presence_dot),
+              lv_color_hex(on ? 0x22C55E : 0x64748B), 0);

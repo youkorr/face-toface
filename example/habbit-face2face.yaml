@@ -1,0 +1,103 @@
+# =============================================================================
+# face2face — bloc pour HABBIT Desk PRO (ESP32-P4 + sc202cs + ES8388/ES7210)
+# -----------------------------------------------------------------------------
+# À fusionner dans votre habbit.yaml. Reprend vos ids existants :
+#   caméra: tab5_cam | micro: tab5_microphone | HP: tab5_speaker
+# Audio : mic+HP partagent déjà le bus I2S "mic_bus" (full-duplex OK, comme le
+# voice_assistant). face2face coupe wake-word/VA puis démarre l'audio après un
+# court délai pour laisser le bus se libérer (évite "Parent bus is busy").
+# =============================================================================
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [face2face]
+    refresh: always
+
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: tab5_microphone
+  speaker_id: tab5_speaker
+  enable_audio: true
+  audio_sample_rate: 16000
+  # --- Vidéo : downscale pour tenir sur le WiFi-over-SDIO ---
+  # sc202cs sort en 1280x720. scale 3 -> 426x240 (quelques Ko/image).
+  scale: 3
+  jpeg_quality: 35
+  framerate: 10
+  swap_colors: true          # corrige les couleurs du décodeur JPEG matériel
+  # --- Audio / appel ---
+  ring_timeout: 30s
+  audio_start_delay: 1500ms  # délai avant mic+HP (montez à 2500ms si "bus busy")
+  enable_aec: true
+  aec_mode: voip_high_perf
+  aec_filter_length: 4
+  on_ringing:
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
+  on_streaming:
+    # Libère le micro + le bus I2S pour l'appel.
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
+    # Libère la caméra : sinon le preview vole les 2 buffers (no buffer available).
+    - lambda: "id(camera_display)->set_enabled(false);"
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+  on_idle:
+    - lambda: "id(camera_display)->set_enabled(true);"
+    - micro_wake_word.start:
+    - lvgl.widget.hide: incoming_overlay
+
+# IP du correspondant, éditable dans Home Assistant + mémorisée au reboot.
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    icon: "mdi:ip-network"
+    mode: text
+    optimistic: true
+    restore_value: true
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
+
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+button:
+  - platform: template
+    name: "Appeler"
+    on_press: [ face2face.call: f2f ]
+  - platform: template
+    name: "Décrocher"
+    on_press: [ face2face.answer: f2f ]
+  - platform: template
+    name: "Raccrocher"
+    on_press: [ face2face.hangup: f2f ]
+
+# Pousse la vidéo distante + présence dans la page d'appel (canvas: remote_video).
+interval:
+  - interval: 80ms
+    then:
+      - lambda: |-
+          if (id(f2f).has_new_remote_frame()) {
+            const uint8_t *rgb = id(f2f).remote_rgb565();
+            if (rgb != nullptr) {
+              lv_canvas_set_buffer(id(remote_video), (void*)rgb,
+                  id(f2f).remote_width(), id(f2f).remote_height(),
+                  LV_COLOR_FORMAT_RGB565);
+              lv_obj_invalidate(id(remote_video));
+            }
+          }
+          bool on = id(f2f).peer_online();
+          lv_obj_set_style_bg_color(id(presence_dot),
+              lv_color_hex(on ? 0x22C55E : 0x64748B), 0);

@@ -96,15 +96,26 @@ void Face2Face::loop() {
   }
 
   // Deferred audio start (after the I2S bus is freed by the wake-word).
+  // The ESPHome i2s driver retries its own start internally ("retrying in 1s"),
+  // but if voice_assistant/mWW re-grabbed the mic we re-issue start a few times.
   if (audio_due_ms_ != 0 && state_ == STATE_STREAMING && (int32_t) (now_ms - audio_due_ms_) >= 0) {
-    audio_due_ms_ = 0;
     if (spk_ != nullptr)
       spk_->start();
     if (mic_ != nullptr && !mic_->is_running()) {
       mic_->start();
       mic_started_ = true;
     }
-    ESP_LOGI(TAG, "Audio started");
+    // Consider audio up once the mic is actually running; otherwise retry in
+    // 500ms (bounded) so a slow wake-word handoff doesn't leave audio dead.
+    if (mic_ == nullptr || mic_->is_running()) {
+      audio_due_ms_ = 0;
+      ESP_LOGI(TAG, "Audio started");
+    } else if (++audio_retries_ < 10) {
+      audio_due_ms_ = now_ms + 500;
+    } else {
+      audio_due_ms_ = 0;
+      ESP_LOGW(TAG, "Audio start gave up (mic busy)");
+    }
   }
 
   // Send our video while streaming, rate-limited to framerate_.
@@ -199,6 +210,7 @@ void Face2Face::start_streaming_() {
   // once audio_start_delay_ms_ has elapsed.
   if (audio_enabled_)
     audio_due_ms_ = millis() + audio_start_delay_ms_;
+    audio_retries_ = 0;
   ESP_LOGI(TAG, "Call established (streaming)");
 }
 

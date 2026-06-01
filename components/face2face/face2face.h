@@ -208,6 +208,7 @@ class Face2Face : public Component {
 
   bool camera_started_{false};  // did we start camera streaming for this call?
   uint32_t audio_due_ms_{0};    // when to start mic+speaker (0 = not pending)
+  uint8_t audio_retries_{0};    // bounded retries for the mic handoff
 
   // peers
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
