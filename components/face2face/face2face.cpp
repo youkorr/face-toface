@@ -7,6 +7,8 @@
 // lwIP / POSIX sockets (ESP-IDF)
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // Peer ESPHome components
 #include "esphome/components/esp_cam_sensor/esp_cam_sensor_camera.h"
@@ -285,6 +287,8 @@ bool Face2Face::open_sockets_() {
     ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     int rxbuf = 65536;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
+    int txbuf = 65536;  // bigger TX buffer: a JPEG frame is dozens of fragments
+    ::setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &txbuf, sizeof(txbuf));
 
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -340,10 +344,25 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     hdr->frag_index = f;
     hdr->payload_len = plen;
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
-    int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-    if (sent < 0 && errno != EWOULDBLOCK) {
+    // The socket is non-blocking (so recv never stalls). A JPEG frame is dozens
+    // of fragments sent back-to-back; when lwIP's TX buffer is momentarily full
+    // sendto returns EWOULDBLOCK. Previously the fragment was DROPPED, and a
+    // frame missing any fragment is discarded whole by the receiver -> "frame
+    // by frame" and total loss at higher resolution. Retry with a short yield
+    // (taskYIELD, not vTaskDelay which is 10ms at 100Hz tick) so lwIP drains.
+    int tries = 0;
+    while (true) {
+      int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+      if (sent >= 0)
+        break;
+      if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM || errno == ENOBUFS) {
+        if (++tries > 20000)
+          break;  // give up on this fragment rather than stall forever
+        taskYIELD();
+        continue;
+      }
       ESP_LOGW(TAG, "sendto failed: errno %d", errno);
-      break;
+      return;
     }
   }
 }
