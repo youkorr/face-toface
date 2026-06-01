@@ -533,7 +533,9 @@ bool Face2Face::ensure_media_() {
   if (!jpeg_init_())
     return false;
   remote_fb_.assign((size_t) width_ * height_ * 2, 0);
-  if (audio_enabled_ && aec_enabled_)
+  // AEC is allocated once for the component lifetime (never freed on hangup, to
+  // avoid racing the mic task). Only init it the first time.
+  if (audio_enabled_ && aec_enabled_ && !aec_ready_)
     aec_init_();  // best-effort; passes through raw audio if it fails
   return true;
 }
@@ -541,7 +543,10 @@ bool Face2Face::ensure_media_() {
 // Free everything allocated by ensure_media_ so idle RAM/PSRAM use is minimal.
 void Face2Face::release_media_() {
   jpeg_deinit_();
-  aec_deinit_();
+  // NOTE: we deliberately do NOT free the AEC here. on_mic_data_ runs in the
+  // microphone's own FreeRTOS task; freeing aec_in_/aec_handle_ from the main
+  // loop on hangup races with it -> use-after-free / Guru Meditation. The AEC
+  // buffers are tiny (~16KB) so we keep them for the component lifetime.
   std::vector<uint8_t>().swap(remote_fb_);  // release capacity, not just size
   remote_w_ = 0;
   remote_h_ = 0;
@@ -554,6 +559,12 @@ void Face2Face::pump_video_tx_() {
   esp_cam_sensor::SimpleBufferElement *el = nullptr;
   uint8_t *rgb = nullptr;
   int w = 0, h = 0;
+  // Pump the V4L2 capture pipeline ourselves. lvgl_camera_display normally does
+  // this via capture_frame(), but it is disabled during a call, so face2face
+  // must dequeue the next frame or current_buffer_index_ stays -1 forever
+  // ("get_current_rgb_frame: no buffer available" flood, no video).
+  if (!camera_->capture_frame())
+    return;
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
