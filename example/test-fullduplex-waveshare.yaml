@@ -89,7 +89,7 @@ esp_afe:
   ns_enabled: true
   vad_enabled: false
   continuous_vad: true
-  agc_enabled: false
+  agc_enabled: true         # gain auto : relève la voix faible (fix stt-no-text)
   feed_buf_in_psram: true
   feed_ring_in_psram: true
   fetch_ring_in_psram: true
@@ -112,7 +112,7 @@ esp_audio_stack:
       type: es7210
       address: 0x40
       mic_selected: 0x01      # 1 seul micro (canal 0)
-      gain_db: 30.0
+      gain_db: 37.5           # gain micro élevé (ES7210 max ~42dB)
     output:
       type: es8311
       address: 0x18
