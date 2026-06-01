@@ -111,6 +111,7 @@ class Face2Face : public Component {
   void set_audio_sample_rate(uint32_t r) { audio_sample_rate_ = r; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
   void set_aec_filter_length(int n) { aec_filter_length_ = n; }
+  void set_audio_start_delay(uint32_t ms) { audio_start_delay_ms_ = ms; }
   void set_aec_mode(int m) { aec_mode_ = m; }
   void set_ring_timeout(uint32_t ms) { ring_timeout_ms_ = ms; }
   void set_auto_answer(bool a) { auto_answer_ = a; }
@@ -201,8 +202,10 @@ class Face2Face : public Component {
   bool aec_enabled_{true};
   int aec_filter_length_{4};
   int aec_mode_{4};  // AEC_MODE_VOIP_HIGH_PERF
+  uint32_t audio_start_delay_ms_{1500};  // wait for wake-word to free the I2S bus
 
   bool camera_started_{false};  // did we start camera streaming for this call?
+  uint32_t audio_due_ms_{0};    // when to start mic+speaker (0 = not pending)
 
   // peers
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};

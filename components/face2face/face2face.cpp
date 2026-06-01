@@ -95,6 +95,18 @@ void Face2Face::loop() {
     go_idle_();
   }
 
+  // Deferred audio start (after the I2S bus is freed by the wake-word).
+  if (audio_due_ms_ != 0 && state_ == STATE_STREAMING && (int32_t) (now_ms - audio_due_ms_) >= 0) {
+    audio_due_ms_ = 0;
+    if (spk_ != nullptr)
+      spk_->start();
+    if (mic_ != nullptr && !mic_->is_running()) {
+      mic_->start();
+      mic_started_ = true;
+    }
+    ESP_LOGI(TAG, "Audio started");
+  }
+
   // Send our video while streaming, rate-limited to framerate_.
   if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
     uint32_t now = micros();
@@ -181,20 +193,19 @@ void Face2Face::start_streaming_() {
     camera_->start_streaming();
     camera_started_ = true;
   }
-  if (audio_enabled_) {
-    if (spk_ != nullptr)
-      spk_->start();
-    if (mic_ != nullptr && !mic_->is_running()) {
-      mic_->start();
-      mic_started_ = true;
-    }
-  }
+  // Defer mic+speaker start: micro_wake_word/voice_assistant (stopped in
+  // on_streaming) need a moment to release the shared I2S bus, otherwise the
+  // speaker fails with "Parent bus is busy". The actual start happens in loop()
+  // once audio_start_delay_ms_ has elapsed.
+  if (audio_enabled_)
+    audio_due_ms_ = millis() + audio_start_delay_ms_;
   ESP_LOGI(TAG, "Call established (streaming)");
 }
 
 void Face2Face::go_idle_() {
   bool was_active = (state_ != STATE_IDLE);
   set_state_(STATE_IDLE);
+  audio_due_ms_ = 0;  // cancel any pending deferred audio start
   if (audio_enabled_) {
     if (mic_ != nullptr && mic_started_) {
       mic_->stop();

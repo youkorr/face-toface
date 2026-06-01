@@ -40,6 +40,7 @@ CONF_AUTO_ANSWER = "auto_answer"
 CONF_ENABLE_AEC = "enable_aec"
 CONF_AEC_MODE = "aec_mode"
 CONF_AEC_FILTER_LENGTH = "aec_filter_length"
+CONF_AUDIO_START_DELAY = "audio_start_delay"
 
 # ESP-SR aec_mode_t values (from esp_aec.h).
 AEC_MODES = {
@@ -95,6 +96,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
         cv.Optional(CONF_AEC_MODE, default="voip_high_perf"): cv.enum(AEC_MODES, lower=True),
         cv.Optional(CONF_AEC_FILTER_LENGTH, default=4): cv.int_range(min=1, max=8),
+        cv.Optional(CONF_AUDIO_START_DELAY, default="1500ms"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ON_RINGING): _trigger(),
         cv.Optional(CONF_ON_OUTGOING_CALL): _trigger(),
         cv.Optional(CONF_ON_STREAMING): _trigger(),
@@ -121,6 +123,7 @@ async def to_code(config):
     cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
     cg.add(var.set_aec_mode(config[CONF_AEC_MODE]))
     cg.add(var.set_aec_filter_length(config[CONF_AEC_FILTER_LENGTH]))
+    cg.add(var.set_audio_start_delay(config[CONF_AUDIO_START_DELAY]))
 
     # Acoustic echo cancellation: pull Espressif ESP-SR and compile the AEC path
     # only when enabled (keeps the component dependency-free otherwise).
