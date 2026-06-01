@@ -14,11 +14,11 @@
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/components/audio/audio.h"
 
-// ESP32-P4 hardware JPEG codec (built-in IDF component esp_driver_jpeg).
+// ESP32-P4 hardware JPEG codec
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
-// Acoustic echo cancellation (Espressif ESP-SR).
+// Acoustic echo cancellation
 #ifdef FACE2FACE_USE_AEC
 #include "esp_aec.h"
 #include "esp_heap_caps.h"
@@ -45,51 +45,10 @@ void FrameAssembler::reset(uint16_t id, uint32_t size, uint16_t count) {
 // Helper: Swap bytes in RGB565 buffer (Big Endian <-> Little Endian)
 // ===========================================================================
 static void swap_rgb565_endian(uint8_t *buf, size_t len) {
-  // Swap each pair of bytes: AB -> BA for every pixel
   for (size_t i = 0; i + 1 < len; i += 2) {
     uint8_t tmp = buf[i];
     buf[i] = buf[i + 1];
     buf[i + 1] = tmp;
-  }
-}
-
-// ===========================================================================
-// Helper: Swap Red and Blue channels in RGB565 buffer (RGB565 <-> BGR565)
-// ===========================================================================
-static void swap_rgb565_red_blue(uint8_t *buf, size_t len) {
-  for (size_t i = 0; i + 1 < len; i += 2) {
-    // Read pixel as little-endian uint16
-    uint16_t pixel = (uint16_t) buf[i] | ((uint16_t) buf[i + 1] << 8);
-    // Extract components: RRRRRGGGGGGBBBBB
-    uint16_t r = (pixel >> 11) & 0x1F;   // 5 bits red
-    uint16_t g = (pixel >> 5) & 0x3F;    // 6 bits green
-    uint16_t b = pixel & 0x1F;           // 5 bits blue
-    // Rebuild with R and B swapped: BBBBBGGGGGGRRRRR
-    uint16_t new_pixel = (b << 11) | (g << 5) | r;
-    buf[i] = new_pixel & 0xFF;
-    buf[i + 1] = (new_pixel >> 8) & 0xFF;
-  }
-}
-
-// ===========================================================================
-// Helper: Combined fix - swap endian AND swap R/B channels
-// Use this if colors are completely wrong (not just R<->B swap)
-// ===========================================================================
-static void fix_rgb565_color_order(uint8_t *buf, size_t len) {
-  for (size_t i = 0; i + 1 < len; i += 2) {
-    // Step 1: Swap endianness (bytes are reversed from JPEG decoder)
-    uint8_t tmp = buf[i];
-    buf[i] = buf[i + 1];
-    buf[i + 1] = tmp;
-
-    // Step 2: Now read as native uint16 and swap R<->B if needed
-    uint16_t pixel = (uint16_t) buf[i] | ((uint16_t) buf[i + 1] << 8);
-    uint16_t r = (pixel >> 11) & 0x1F;
-    uint16_t g = (pixel >> 5) & 0x3F;
-    uint16_t b = pixel & 0x1F;
-    uint16_t new_pixel = (b << 11) | (g << 5) | r;
-    buf[i] = new_pixel & 0xFF;
-    buf[i + 1] = (new_pixel >> 8) & 0xFF;
   }
 }
 
@@ -120,13 +79,11 @@ void Face2Face::loop() {
 
   uint32_t now_ms = millis();
 
-  // Heartbeat (presence), even when idle.
   if (now_ms - last_ping_tx_ms_ >= 1000) {
     last_ping_tx_ms_ = now_ms;
     send_ping_();
   }
 
-  // Ring/dial timeout: give up if the peer never answers.
   if ((state_ == STATE_OUTGOING || state_ == STATE_RINGING) &&
       (now_ms - state_since_ms_) > ring_timeout_ms_) {
     ESP_LOGI(TAG, "Call setup timed out");
@@ -137,7 +94,6 @@ void Face2Face::loop() {
     go_idle_();
   }
 
-  // Send our video while streaming, rate-limited to framerate_.
   if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
     uint32_t now = micros();
     uint32_t period = 1000000UL / framerate_;
@@ -159,7 +115,7 @@ void Face2Face::dump_config() {
 }
 
 // ===========================================================================
-// Call FSM  (native signaling — replaces the external intercom)
+// Call FSM
 // ===========================================================================
 void Face2Face::set_state_(CallState s) {
   if (state_ == s)
@@ -454,7 +410,7 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
 }
 
 // ===========================================================================
-// Hardware JPEG codec (esp_driver_jpeg)
+// Hardware JPEG codec
 // ===========================================================================
 bool Face2Face::jpeg_init_() {
   jpeg_encode_engine_cfg_t enc_eng = {};
@@ -560,10 +516,7 @@ void Face2Face::pump_video_tx_() {
       ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
     std::memcpy(enc_in_, rgb, frame_bytes);
 
-    // =========================================================================
-    // FIX COULEUR TX: La caméra fournit du RGB565 Little Endian mais le codec
-    // JPEG attend du RGB565 Big Endian. On swap les octets AVANT l'encodage.
-    // =========================================================================
+    // FIX: Swap endian before encoding - camera gives LE, encoder expects BE
     swap_rgb565_endian(enc_in_, frame_bytes);
 
     jpeg_encode_cfg_t cfg = {};
@@ -602,7 +555,7 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
 
   jpeg_decode_cfg_t cfg = {};
   cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // <-- FIX: BGR pour correspondre à l'écran LVGL
+  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // FIX: BGR order for LVGL display
 
   uint32_t out_len = 0;
   if (jpeg_decoder_process(reinterpret_cast(jpeg_dec_), &cfg, dec_in_, len, dec_out_,
@@ -616,18 +569,14 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
     remote_fb_.assign(want, 0);
   std::memcpy(remote_fb_.data(), dec_out_, n);
 
-  // =========================================================================
-  // FIX COULEUR RX: Le décodeur JPEG hardware sort du RGB565 Big Endian mais
-  // LVGL/l'écran attend du RGB565 Little Endian (byte-swapped).
-  // On swap les octets APRÈS le décodage pour que les couleurs soient correctes.
-  // =========================================================================
+  // FIX: Swap endian after decoding - decoder outputs BE, display expects LE
   swap_rgb565_endian(remote_fb_.data(), n);
 
   return true;
 }
 
 // ===========================================================================
-// Audio (ESPHome microphone -> [AEC] -> UDP -> speaker)
+// Audio
 // ===========================================================================
 bool Face2Face::aec_init_() {
 #ifdef FACE2FACE_USE_AEC
