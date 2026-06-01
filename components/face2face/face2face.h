@@ -106,6 +106,7 @@ class Face2Face : public Component {
   void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
   void set_framerate(uint8_t fps) { framerate_ = fps; }
   void set_jpeg_quality(uint8_t q) { jpeg_quality_ = q; }
+  void set_swap_colors(bool s) { swap_colors_ = s; }
   void set_audio_enabled(bool e) { audio_enabled_ = e; }
   void set_audio_sample_rate(uint32_t r) { audio_sample_rate_ = r; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -192,6 +193,7 @@ class Face2Face : public Component {
   uint16_t height_{480};
   uint8_t framerate_{15};
   uint8_t jpeg_quality_{40};
+  bool swap_colors_{true};  // byte-swap RGB565 (HW JPEG decoder vs LVGL order)
   bool audio_enabled_{true};
   uint32_t audio_sample_rate_{16000};
   uint32_t ring_timeout_ms_{30000};

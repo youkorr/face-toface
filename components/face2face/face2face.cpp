@@ -356,7 +356,7 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
       if (sent >= 0)
         break;
       if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM || errno == ENOBUFS) {
-        if (++tries > 20000)
+        if (++tries > 4000)
           break;  // give up on this fragment rather than stall forever
         taskYIELD();
         continue;
@@ -602,7 +602,18 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   size_t n = out_len < want ? out_len : want;
   if (remote_fb_.size() != want)
     remote_fb_.assign(want, 0);
-  std::memcpy(remote_fb_.data(), dec_out_, n);
+  if (swap_colors_) {
+    // The hardware JPEG decoder emits RGB565 with a byte order that LVGL reads
+    // swapped (psychedelic magenta/cyan). Swap the two bytes of each pixel so
+    // the canvas shows correct colors without touching the LVGL byte_order.
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(dec_out_);
+    uint16_t *dst = reinterpret_cast<uint16_t *>(remote_fb_.data());
+    size_t px = n / 2;
+    for (size_t i = 0; i < px; i++)
+      dst[i] = (uint16_t) ((src[i] >> 8) | (src[i] << 8));
+  } else {
+    std::memcpy(remote_fb_.data(), dec_out_, n);
+  }
   return true;
 }
 

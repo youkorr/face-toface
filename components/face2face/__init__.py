@@ -32,6 +32,7 @@ CONF_WIDTH = "width"
 CONF_HEIGHT = "height"
 CONF_FRAMERATE = "framerate"
 CONF_JPEG_QUALITY = "jpeg_quality"
+CONF_SWAP_COLORS = "swap_colors"
 CONF_ENABLE_AUDIO = "enable_audio"
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_RING_TIMEOUT = "ring_timeout"
@@ -86,6 +87,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_HEIGHT, default=480): cv.int_range(min=120, max=1080),
         cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
         cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
+        cv.Optional(CONF_SWAP_COLORS, default=True): cv.boolean,
         cv.Optional(CONF_ENABLE_AUDIO, default=True): cv.boolean,
         cv.Optional(CONF_AUDIO_SAMPLE_RATE, default=16000): cv.int_,
         cv.Optional(CONF_RING_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
@@ -111,6 +113,7 @@ async def to_code(config):
     cg.add(var.set_resolution(config[CONF_WIDTH], config[CONF_HEIGHT]))
     cg.add(var.set_framerate(config[CONF_FRAMERATE]))
     cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
+    cg.add(var.set_swap_colors(config[CONF_SWAP_COLORS]))
     cg.add(var.set_audio_enabled(config[CONF_ENABLE_AUDIO]))
     cg.add(var.set_audio_sample_rate(config[CONF_AUDIO_SAMPLE_RATE]))
     cg.add(var.set_ring_timeout(config[CONF_RING_TIMEOUT]))
