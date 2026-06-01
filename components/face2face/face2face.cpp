@@ -568,31 +568,50 @@ void Face2Face::pump_video_tx_() {
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
-  // Resolution-agnostic: grow the DMA buffers to the ACTUAL camera frame size
-  // (e.g. 1280x720) instead of rejecting frames that don't match width_/height_.
-  size_t frame_bytes = (size_t) w * h * 2;
-  bool have_input = ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
-                    ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false);
-  if (have_input)
-    std::memcpy(enc_in_, rgb, frame_bytes);
+  // Downscale by an integer factor (scale_) while copying into the encoder
+  // input buffer. A 1280x720 frame at scale 3 becomes 426x240 -> the JPEG is a
+  // few KB (a handful of UDP fragments) instead of ~100KB (dozens), which is
+  // what the WiFi-over-SDIO link can actually sustain.
+  int s = scale_ < 1 ? 1 : scale_;
+  int ow = w / s, oh = h / s;
+  ow &= ~1;  // keep even dims for YUV420 subsampling
+  oh &= ~1;
+  if (ow < 16 || oh < 16) { camera_->release_buffer(el); return; }
+  size_t out_bytes = (size_t) ow * oh * 2;
+  bool have_input = ensure_enc_buf(&enc_in_, &enc_in_cap_, out_bytes, true) &&
+                    ensure_enc_buf(&enc_out_, &enc_out_cap_, out_bytes, false);
+  if (have_input) {
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
+    uint16_t *dst = reinterpret_cast<uint16_t *>(enc_in_);
+    if (s == 1) {
+      std::memcpy(dst, src, out_bytes);
+    } else {
+      for (int y = 0; y < oh; y++) {
+        const uint16_t *srow = src + (size_t) (y * s) * w;
+        uint16_t *drow = dst + (size_t) y * ow;
+        for (int x = 0; x < ow; x++)
+          drow[x] = srow[x * s];
+      }
+    }
+  }
   // Release the camera buffer NOW, before the (slow) JPEG encode + network send.
   // The camera only has 2 buffers; holding one during encode/send starves the
   // sensor -> "get_current_rgb_frame: no buffer available" flood and choppy fps.
   camera_->release_buffer(el);
 
   if (!have_input) {
-    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
+    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", ow, oh);
     return;
   }
   jpeg_encode_cfg_t cfg = {};
   cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
   cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
   cfg.image_quality = jpeg_quality_;
-  cfg.width = w;
-  cfg.height = h;
+  cfg.width = ow;
+  cfg.height = oh;
   uint32_t out_size = 0;
   esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
-                                       frame_bytes, enc_out_, enc_out_cap_, &out_size);
+                                       out_bytes, enc_out_, enc_out_cap_, &out_size);
   if (err == ESP_OK && out_size > 0)
     send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
   else
