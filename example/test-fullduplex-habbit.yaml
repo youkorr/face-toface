@@ -16,6 +16,9 @@ substitutions:
 
 esphome:
   name: ${name}
+  # 2 piles ML (esp-dl + esp-sr) -> compilation lourde. Limiter à 1 process
+  # évite "cc1plus: fatal error: Killed" (OOM). Montez à 2 si assez de RAM.
+  compile_process_limit: 1
 
 esp32:
   variant: esp32p4

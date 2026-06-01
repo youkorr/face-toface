@@ -15,6 +15,10 @@ substitutions:
 
 esphome:
   name: ${name}
+  # Ce projet tire 2 piles ML (esp-dl/tflite + esp-sr/tflite) : la compilation
+  # est lourde. Limiter à 1 process évite "cc1plus: fatal error: Killed" (OOM).
+  # Plus lent mais va au bout. Montez à 2 si votre machine a assez de RAM.
+  compile_process_limit: 1
 
 esp32:
   variant: esp32p4
