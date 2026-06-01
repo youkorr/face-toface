@@ -29,6 +29,10 @@ esp32:
     type: esp-idf
     advanced:
       enable_idf_experimental_features: true
+    sdkconfig_options:
+      # esp_audio_stack peut bloquer la loopTask au démarrage -> task_wdt.
+      # On désactive le watchdog (l'audio est une tâche temps-réel légitime).
+      CONFIG_ESP_TASK_WDT_EN: "n"
 
 psram:
   mode: hex
@@ -70,18 +74,18 @@ i2c:
     scl: GPIO8
     frequency: 400kHz
 
-# --- Front-end audio (AEC matérielle) ---
+# --- Front-end audio — SINGLE MIC (plus simple, micro fournit des données) ---
+# Le dual-mic TDM (mic_slots=[0,2]) donnait "AFE Ringbuffer empty" = le feed I2S
+# ne captait rien sur les slots. On simplifie : 1 micro, pas de TDM.
 esp_afe:
   id: afe_processor
   type: fd
   mode: low_cost
-  mic_num: 2
-  input_format: MMNR
+  mic_num: 1
+  input_format: MN          # 1 mic (M) + 1 ref (N)
   aec_enabled: false
-  aec_off_output: raw_1
-  aec_filter_length: 4
-  aec_nlp_level: normal
-  se_enabled: true
+  aec_off_output: raw_0     # single mic -> raw_0
+  se_enabled: false         # SE/BSS inutile en mono
   ns_enabled: true
   vad_enabled: false
   continuous_vad: true
@@ -107,20 +111,15 @@ esp_audio_stack:
     input:
       type: es7210
       address: 0x40
-      mic_selected: 0x0F
+      mic_selected: 0x01      # 1 seul micro (canal 0)
       gain_db: 30.0
-      ref_channel: 1
-      ref_gain_db: 0.0
     output:
       type: es8311
       address: 0x18
       use_mclk: true
       no_dac_ref: true
   slot_bit_width: 16
-  use_tdm_reference: true
-  tdm_total_slots: 4
-  tdm_mic_slots: [0, 2]
-  tdm_ref_slot: 1
+  use_tdm_reference: false   # pas de TDM : référence d'écho logicielle
   buffers_in_psram: true
 
 microphone:
