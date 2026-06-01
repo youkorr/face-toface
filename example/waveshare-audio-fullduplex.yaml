@@ -20,6 +20,13 @@
 #       - microphone: -> le SEUL item "platform: i2s_audio" (esp32_microphone)
 #       - speaker:    -> le SEUL item "platform: i2s_audio" (esp32_speaker)
 #    GARDEZ les blocs mixer/resampler/media_player/voice_assistant/mWW tels quels.
+#
+# ⚠️⚠️ CONFLIT esp-sr — TRÈS IMPORTANT ⚠️⚠️
+# esp_audio_stack tire DÉJÀ esp-sr (pour son AEC matérielle). Si face2face a
+# aussi enable_aec: true, il tire un 2e esp-sr -> erreur de build :
+#   "Requirement esp-sr and espressif__esp-sr are both added"
+# => Avec esp_audio_stack, face2face DOIT avoir enable_aec: false (ci-dessous).
+#    L'écho est annulé par le SE/BSS dual-mic de esp_afe, pas par face2face.
 # =============================================================================
 
 external_components:
