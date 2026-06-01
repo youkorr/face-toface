@@ -28,7 +28,7 @@ esp32:
     # Pin esp-dsp 1.7.0 so esp-sr (AEC) and esp-dl (if you add face_detection)
     # agree on one esp-dsp version (avoids the esp-dsp 1.7.x/1.8.0 conflict).
     components:
-      - espressif/esp-dsp==1.7.0
+      - espressif/esp-dsp==1.8.0
     advanced:
       enable_idf_experimental_features: true
     sdkconfig_options:
