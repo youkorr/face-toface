@@ -315,6 +315,7 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
   hdr->frag_count = frag_count;
   hdr->frame_size = len;
 
+  uint32_t start_ms = millis();
   for (uint16_t f = 0; f < frag_count; f++) {
     uint32_t off = (uint32_t) f * F2F_MAX_PAYLOAD;
     uint16_t plen = (len - off) > F2F_MAX_PAYLOAD ? F2F_MAX_PAYLOAD : (uint16_t) (len - off);
@@ -716,6 +717,7 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
 
 }  // namespace face2face
 }  // namespace esphome
+
 
 
 
