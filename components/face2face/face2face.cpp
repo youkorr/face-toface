@@ -333,6 +333,7 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
   hdr->frag_count = frag_count;
   hdr->frame_size = len;
 
+  uint32_t start_ms = millis();
   for (uint16_t f = 0; f < frag_count; f++) {
     uint32_t off = (uint32_t) f * F2F_MAX_PAYLOAD;
     uint16_t plen = (len - off) > F2F_MAX_PAYLOAD ? F2F_MAX_PAYLOAD : (uint16_t) (len - off);
@@ -342,21 +343,22 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
     
     int sent;
-    int retries = 0;
     do {
       sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
       if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
-        retries++;
-        // Wait 2ms to let WiFi driver transmit and free up some TX buffers
-        vTaskDelay(pdMS_TO_TICKS(2));
+        if (millis() - start_ms > 30) {
+          ESP_LOGW(TAG, "Network congested, dropping frame (took > 30ms)");
+          return; // Abort sending the rest of this frame
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
       } else {
         break;
       }
-    } while (retries < 50);
+    } while (true);
 
     if (sent < 0) {
-      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d, retries %d", errno, retries);
-      break; // Abort sending the rest of this frame
+      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d", errno);
+      return; // Abort sending the rest of this frame
     }
   }
 }
@@ -545,15 +547,7 @@ void Face2Face::pump_video_tx_() {
   size_t frame_bytes = (size_t) w * h * 2;
   if (ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
       ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
-    // Camera typically provides Big-Endian RGB565. The hardware JPEG encoder
-    // expects Little-Endian. Swap the bytes so YUV conversion doesn't create
-    // massive artifacts and wrong colors.
-    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
-    uint16_t *dst = reinterpret_cast<uint16_t *>(enc_in_);
-    size_t pixels = w * h;
-    for (size_t i = 0; i < pixels; i++) {
-      dst[i] = (src[i] >> 8) | (src[i] << 8);
-    }
+    std::memcpy(enc_in_, rgb, frame_bytes);
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
     cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
@@ -563,10 +557,16 @@ void Face2Face::pump_video_tx_() {
     uint32_t out_size = 0;
     esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
                                          frame_bytes, enc_out_, enc_out_cap_, &out_size);
-    if (err == ESP_OK && out_size > 0)
+    if (err == ESP_OK && out_size > 0) {
+      static uint32_t last_log = 0;
+      if (millis() - last_log > 2000) {
+        ESP_LOGI(TAG, "JPEG encoded size: %lu bytes", out_size);
+        last_log = millis();
+      }
       send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
-    else
+    } else {
       ESP_LOGW(TAG, "jpeg encode failed: %d", err);
+    }
   } else {
     ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
   }
@@ -592,7 +592,8 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
 
   jpeg_decode_cfg_t cfg = {};
   cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+  // Use BGR instead of RGB to fix the pink/purple colors!
+  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
 
   uint32_t out_len = 0;
   if (jpeg_decoder_process(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_), &cfg, dec_in_, len, dec_out_,
@@ -605,14 +606,7 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   if (remote_fb_.size() != want)
     remote_fb_.assign(want, 0);
   
-  // Hardware JPEG decoder outputs Little-Endian RGB565.
-  // LVGL on ESPHome typically expects Big-Endian RGB565.
-  const uint16_t *src = reinterpret_cast<const uint16_t *>(dec_out_);
-  uint16_t *dst = reinterpret_cast<uint16_t *>(remote_fb_.data());
-  size_t pixels = n / 2;
-  for (size_t i = 0; i < pixels; i++) {
-    dst[i] = (src[i] >> 8) | (src[i] << 8);
-  }
+  std::memcpy(remote_fb_.data(), dec_out_, n);
   return true;
 }
 
@@ -745,4 +739,5 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
 
 }  // namespace face2face
 }  // namespace esphome
+
 
