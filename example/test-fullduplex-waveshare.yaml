@@ -82,7 +82,7 @@ esp_afe:
   type: fd
   mode: low_cost
   mic_num: 1
-  input_format: MN          # 1 mic (M) + 1 ref (N)
+  input_format: MNR         # 1 mic (M) + unused (N) + reference (R)
   aec_enabled: false
   aec_off_output: raw_0     # single mic -> raw_0
   se_enabled: false         # SE/BSS inutile en mono
