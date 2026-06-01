@@ -1,12 +1,12 @@
 #include "face2face.h"
 #include "esphome/core/log.h"
 
-#include <cstring>
-#include <cstdlib>
+#include 
+#include 
 
 // lwIP / POSIX sockets (ESP-IDF)
-#include <lwip/sockets.h>
-#include <lwip/netdb.h>
+#include 
+#include 
 
 // Peer ESPHome components
 #include "esphome/components/esp_cam_sensor/esp_cam_sensor_camera.h"
@@ -18,6 +18,7 @@
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
+// Acoustic echo cancellation (Espressif ESP-SR).
 #ifdef FACE2FACE_USE_AEC
 #include "esp_aec.h"
 #include "esp_heap_caps.h"
@@ -41,6 +42,58 @@ void FrameAssembler::reset(uint16_t id, uint32_t size, uint16_t count) {
 }
 
 // ===========================================================================
+// Helper: Swap bytes in RGB565 buffer (Big Endian <-> Little Endian)
+// ===========================================================================
+static void swap_rgb565_endian(uint8_t *buf, size_t len) {
+  // Swap each pair of bytes: AB -> BA for every pixel
+  for (size_t i = 0; i + 1 < len; i += 2) {
+    uint8_t tmp = buf[i];
+    buf[i] = buf[i + 1];
+    buf[i + 1] = tmp;
+  }
+}
+
+// ===========================================================================
+// Helper: Swap Red and Blue channels in RGB565 buffer (RGB565 <-> BGR565)
+// ===========================================================================
+static void swap_rgb565_red_blue(uint8_t *buf, size_t len) {
+  for (size_t i = 0; i + 1 < len; i += 2) {
+    // Read pixel as little-endian uint16
+    uint16_t pixel = (uint16_t) buf[i] | ((uint16_t) buf[i + 1] << 8);
+    // Extract components: RRRRRGGGGGGBBBBB
+    uint16_t r = (pixel >> 11) & 0x1F;   // 5 bits red
+    uint16_t g = (pixel >> 5) & 0x3F;    // 6 bits green
+    uint16_t b = pixel & 0x1F;           // 5 bits blue
+    // Rebuild with R and B swapped: BBBBBGGGGGGRRRRR
+    uint16_t new_pixel = (b << 11) | (g << 5) | r;
+    buf[i] = new_pixel & 0xFF;
+    buf[i + 1] = (new_pixel >> 8) & 0xFF;
+  }
+}
+
+// ===========================================================================
+// Helper: Combined fix - swap endian AND swap R/B channels
+// Use this if colors are completely wrong (not just R<->B swap)
+// ===========================================================================
+static void fix_rgb565_color_order(uint8_t *buf, size_t len) {
+  for (size_t i = 0; i + 1 < len; i += 2) {
+    // Step 1: Swap endianness (bytes are reversed from JPEG decoder)
+    uint8_t tmp = buf[i];
+    buf[i] = buf[i + 1];
+    buf[i + 1] = tmp;
+
+    // Step 2: Now read as native uint16 and swap R<->B if needed
+    uint16_t pixel = (uint16_t) buf[i] | ((uint16_t) buf[i + 1] << 8);
+    uint16_t r = (pixel >> 11) & 0x1F;
+    uint16_t g = (pixel >> 5) & 0x3F;
+    uint16_t b = pixel & 0x1F;
+    uint16_t new_pixel = (b << 11) | (g << 5) | r;
+    buf[i] = new_pixel & 0xFF;
+    buf[i + 1] = (new_pixel >> 8) & 0xFF;
+  }
+}
+
+// ===========================================================================
 // Lifecycle
 // ===========================================================================
 void Face2Face::setup() {
@@ -50,7 +103,7 @@ void Face2Face::setup() {
     return;
   }
   if (audio_enabled_ && mic_ != nullptr) {
-    mic_->add_data_callback([this](const std::vector<uint8_t> &data) { this->on_mic_data_(data); });
+    mic_->add_data_callback([this](const std::vector &data) { this->on_mic_data_(data); });
   }
   if (audio_enabled_ && spk_ != nullptr) {
     spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
@@ -67,11 +120,13 @@ void Face2Face::loop() {
 
   uint32_t now_ms = millis();
 
+  // Heartbeat (presence), even when idle.
   if (now_ms - last_ping_tx_ms_ >= 1000) {
     last_ping_tx_ms_ = now_ms;
     send_ping_();
   }
 
+  // Ring/dial timeout: give up if the peer never answers.
   if ((state_ == STATE_OUTGOING || state_ == STATE_RINGING) &&
       (now_ms - state_since_ms_) > ring_timeout_ms_) {
     ESP_LOGI(TAG, "Call setup timed out");
@@ -82,6 +137,7 @@ void Face2Face::loop() {
     go_idle_();
   }
 
+  // Send our video while streaming, rate-limited to framerate_.
   if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
     uint32_t now = micros();
     uint32_t period = 1000000UL / framerate_;
@@ -234,11 +290,11 @@ void Face2Face::on_ctrl_(uint8_t type) {
 void Face2Face::send_ctrl_(F2FCtrl type) {
   struct sockaddr_in dst {};
   dst.sin_family = AF_INET;
-  dst.sin_port = htons(video_port_); 
+  dst.sin_port = htons(video_port_);
   ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
 
   uint8_t pkt[F2F_HEADER_SIZE + 1];
-  auto *hdr = reinterpret_cast<F2FHeader *>(pkt);
+  auto *hdr = reinterpret_cast(pkt);
   *hdr = F2FHeader{};
   hdr->magic = F2F_MAGIC;
   hdr->stream = F2F_STREAM_CTRL;
@@ -263,9 +319,7 @@ bool Face2Face::open_sockets_() {
     }
     int flags = ::fcntl(sock, F_GETFL, 0);
     ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    
-    // FIX: Augmented to 128KB to support high-quality 800x800 resolution
-    int rxbuf = 131072;
+    int rxbuf = 65536;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
 
     struct sockaddr_in addr {};
@@ -308,14 +362,13 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
   uint16_t frame_id = (stream == F2F_STREAM_VIDEO) ? tx_video_frame_id_++ : tx_audio_frame_id_++;
 
   uint8_t pkt[F2F_HEADER_SIZE + F2F_MAX_PAYLOAD];
-  auto *hdr = reinterpret_cast<F2FHeader *>(pkt);
+  auto *hdr = reinterpret_cast(pkt);
   hdr->magic = F2F_MAGIC;
   hdr->stream = stream;
   hdr->frame_id = frame_id;
   hdr->frag_count = frag_count;
   hdr->frame_size = len;
 
-  uint32_t start_ms = millis();
   for (uint16_t f = 0; f < frag_count; f++) {
     uint32_t off = (uint32_t) f * F2F_MAX_PAYLOAD;
     uint16_t plen = (len - off) > F2F_MAX_PAYLOAD ? F2F_MAX_PAYLOAD : (uint16_t) (len - off);
@@ -323,31 +376,10 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     hdr->frag_index = f;
     hdr->payload_len = plen;
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
-    
-    int sent;
-    do {
-      sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-      if (sent < 0) {
-        if (errno == EWOULDBLOCK || errno == ENOBUFS) {
-          if (millis() - start_ms > 100) {
-            ESP_LOGW(TAG, "Network stalled > 100ms, dropping frame");
-            return; // Abort this frame to prevent freezing ESPHome
-          }
-          vTaskDelay(1);
-          continue; // Retry sending this fragment
-        } else {
-          ESP_LOGW(TAG, "sendto failed: errno %d", errno);
-          return; // Fatal error
-        }
-      }
-      break; // Fragment sent successfully
-    } while (true);
-
-    // FIX: Stronger pacing (1ms pause every 4 packets instead of 8)
-    // This allows the massive 150KB JPEG to flow smoothly over the ESP32 WiFi
-    // without filling up the TX buffer and triggering ENOBUFS.
-    if ((f % 4) == 3) {
-      vTaskDelay(1);
+    int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+    if (sent < 0 && errno != EWOULDBLOCK) {
+      ESP_LOGW(TAG, "sendto failed: errno %d", errno);
+      break;
     }
   }
 }
@@ -375,7 +407,7 @@ void Face2Face::poll_receive_() {
 void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expected) {
   if (len < F2F_HEADER_SIZE)
     return;
-  auto *hdr = reinterpret_cast<const F2FHeader *>(buf);
+  auto *hdr = reinterpret_cast(buf);
   if (hdr->magic != F2F_MAGIC)
     return;
   last_peer_rx_ms_ = millis();
@@ -427,13 +459,13 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
 bool Face2Face::jpeg_init_() {
   jpeg_encode_engine_cfg_t enc_eng = {};
   enc_eng.timeout_ms = 70;
-  if (jpeg_new_encoder_engine(&enc_eng, reinterpret_cast<jpeg_encoder_handle_t *>(&jpeg_enc_)) != ESP_OK) {
+  if (jpeg_new_encoder_engine(&enc_eng, reinterpret_cast(&jpeg_enc_)) != ESP_OK) {
     ESP_LOGE(TAG, "jpeg_new_encoder_engine failed");
     return false;
   }
   jpeg_decode_engine_cfg_t dec_eng = {};
   dec_eng.timeout_ms = 40;
-  if (jpeg_new_decoder_engine(&dec_eng, reinterpret_cast<jpeg_decoder_handle_t *>(&jpeg_dec_)) != ESP_OK) {
+  if (jpeg_new_decoder_engine(&dec_eng, reinterpret_cast(&jpeg_dec_)) != ESP_OK) {
     ESP_LOGE(TAG, "jpeg_new_decoder_engine failed");
     return false;
   }
@@ -453,7 +485,7 @@ static bool ensure_enc_buf(uint8_t **buf, size_t *cap, size_t need, bool input) 
   jpeg_encode_memory_alloc_cfg_t cfg = {};
   cfg.buffer_direction = input ? JPEG_ENC_ALLOC_INPUT_BUFFER : JPEG_ENC_ALLOC_OUTPUT_BUFFER;
   size_t got = 0;
-  *buf = static_cast<uint8_t *>(jpeg_alloc_encoder_mem(need, &cfg, &got));
+  *buf = static_cast(jpeg_alloc_encoder_mem(need, &cfg, &got));
   *cap = (*buf != nullptr) ? (got ? got : need) : 0;
   return *buf != nullptr;
 }
@@ -469,18 +501,18 @@ static bool ensure_dec_buf(uint8_t **buf, size_t *cap, size_t need, bool input) 
   jpeg_decode_memory_alloc_cfg_t cfg = {};
   cfg.buffer_direction = input ? JPEG_DEC_ALLOC_INPUT_BUFFER : JPEG_DEC_ALLOC_OUTPUT_BUFFER;
   size_t got = 0;
-  *buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(need, &cfg, &got));
+  *buf = static_cast(jpeg_alloc_decoder_mem(need, &cfg, &got));
   *cap = (*buf != nullptr) ? (got ? got : need) : 0;
   return *buf != nullptr;
 }
 
 void Face2Face::jpeg_deinit_() {
   if (jpeg_enc_ != nullptr) {
-    jpeg_del_encoder_engine(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_));
+    jpeg_del_encoder_engine(reinterpret_cast(jpeg_enc_));
     jpeg_enc_ = nullptr;
   }
   if (jpeg_dec_ != nullptr) {
-    jpeg_del_decoder_engine(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_));
+    jpeg_del_decoder_engine(reinterpret_cast(jpeg_dec_));
     jpeg_dec_ = nullptr;
   }
   if (enc_in_ != nullptr) { free(enc_in_); enc_in_ = nullptr; }
@@ -501,14 +533,14 @@ bool Face2Face::ensure_media_() {
     return false;
   remote_fb_.assign((size_t) width_ * height_ * 2, 0);
   if (audio_enabled_ && aec_enabled_)
-    aec_init_(); 
+    aec_init_();
   return true;
 }
 
 void Face2Face::release_media_() {
   jpeg_deinit_();
   aec_deinit_();
-  std::vector<uint8_t>().swap(remote_fb_); 
+  std::vector().swap(remote_fb_);
   remote_w_ = 0;
   remote_h_ = 0;
   new_remote_frame_ = false;
@@ -527,28 +559,26 @@ void Face2Face::pump_video_tx_() {
   if (ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
       ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
     std::memcpy(enc_in_, rgb, frame_bytes);
-    
+
+    // =========================================================================
+    // FIX COULEUR TX: La caméra fournit du RGB565 Little Endian mais le codec
+    // JPEG attend du RGB565 Big Endian. On swap les octets AVANT l'encodage.
+    // =========================================================================
+    swap_rgb565_endian(enc_in_, frame_bytes);
+
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
-    // FIX: Set to YUV444 and Quality 80 to get 6x larger file for extreme quality
-    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV444; 
-    cfg.image_quality = 80; 
+    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+    cfg.image_quality = jpeg_quality_;
     cfg.width = w;
     cfg.height = h;
-    
     uint32_t out_size = 0;
-    esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
+    esp_err_t err = jpeg_encoder_process(reinterpret_cast(jpeg_enc_), &cfg, enc_in_,
                                          frame_bytes, enc_out_, enc_out_cap_, &out_size);
-    if (err == ESP_OK && out_size > 0) {
-      static uint32_t last_log = 0;
-      if (millis() - last_log > 2000) {
-        ESP_LOGI(TAG, "JPEG encoded size: %lu bytes", out_size);
-        last_log = millis();
-      }
+    if (err == ESP_OK && out_size > 0)
       send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
-    } else {
+    else
       ESP_LOGW(TAG, "jpeg encode failed: %d", err);
-    }
   } else {
     ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
   }
@@ -572,11 +602,10 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
 
   jpeg_decode_cfg_t cfg = {};
   cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-  // FIX: Use BGR instead of RGB to correct the pink/purple image bug
-  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // <-- FIX: BGR pour correspondre à l'écran LVGL
 
   uint32_t out_len = 0;
-  if (jpeg_decoder_process(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_), &cfg, dec_in_, len, dec_out_,
+  if (jpeg_decoder_process(reinterpret_cast(jpeg_dec_), &cfg, dec_in_, len, dec_out_,
                            dec_out_cap_, &out_len) != ESP_OK)
     return false;
 
@@ -586,6 +615,14 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   if (remote_fb_.size() != want)
     remote_fb_.assign(want, 0);
   std::memcpy(remote_fb_.data(), dec_out_, n);
+
+  // =========================================================================
+  // FIX COULEUR RX: Le décodeur JPEG hardware sort du RGB565 Big Endian mais
+  // LVGL/l'écran attend du RGB565 Little Endian (byte-swapped).
+  // On swap les octets APRÈS le décodage pour que les couleurs soient correctes.
+  // =========================================================================
+  swap_rgb565_endian(remote_fb_.data(), n);
+
   return true;
 }
 
@@ -611,14 +648,14 @@ bool Face2Face::aec_init_() {
     return false;
   }
   size_t bytes = (size_t) aec_chunk_ * sizeof(int16_t);
-  aec_in_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
-  aec_ref_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
-  aec_out_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  aec_in_ = static_cast(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  aec_ref_ = static_cast(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
+  aec_out_ = static_cast(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
   if (aec_in_ == nullptr || aec_ref_ == nullptr || aec_out_ == nullptr) {
     ESP_LOGW(TAG, "AEC buffer alloc failed");
     return false;
   }
-  ref_cap_ = (size_t) aec_chunk_ * 32;  // up to ~0.5-1 s of reference history
+  ref_cap_ = (size_t) aec_chunk_ * 32;
   ref_buf_.assign(ref_cap_, 0);
   ref_head_ = 0;
   ref_count_ = 0;
@@ -636,16 +673,16 @@ bool Face2Face::aec_init_() {
 void Face2Face::aec_deinit_() {
 #ifdef FACE2FACE_USE_AEC
   if (aec_handle_ != nullptr) {
-    aec_destroy(static_cast<aec_handle_t *>(aec_handle_));
+    aec_destroy(static_cast(aec_handle_));
     aec_handle_ = nullptr;
   }
   if (aec_in_ != nullptr) { free(aec_in_); aec_in_ = nullptr; }
   if (aec_ref_ != nullptr) { free(aec_ref_); aec_ref_ = nullptr; }
   if (aec_out_ != nullptr) { free(aec_out_); aec_out_ = nullptr; }
 #endif
-  std::vector<int16_t>().swap(mic_acc_);
-  std::vector<int16_t>().swap(send_acc_);
-  std::vector<int16_t>().swap(ref_buf_);
+  std::vector().swap(mic_acc_);
+  std::vector().swap(send_acc_);
+  std::vector().swap(ref_buf_);
   ref_cap_ = 0;
   ref_head_ = 0;
   ref_count_ = 0;
@@ -662,7 +699,7 @@ void Face2Face::ref_push_(const int16_t *d, size_t n) {
     if (ref_count_ < ref_cap_)
       ref_count_++;
     else
-      ref_head_ = (ref_head_ + 1) % ref_cap_; 
+      ref_head_ = (ref_head_ + 1) % ref_cap_;
   }
 }
 
@@ -673,31 +710,31 @@ void Face2Face::ref_pop_(int16_t *d, size_t n) {
     ref_head_ = (ref_head_ + 1) % ref_cap_;
     ref_count_--;
   }
-  while (k < n)  
+  while (k < n)
     d[k++] = 0;
 }
 
-void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
+void Face2Face::on_mic_data_(const std::vector &data) {
   if (state_ != STATE_STREAMING || data.empty())
     return;
 
 #ifdef FACE2FACE_USE_AEC
   if (aec_ready_) {
-    const int16_t *in = reinterpret_cast<const int16_t *>(data.data());
+    const int16_t *in = reinterpret_cast(data.data());
     mic_acc_.insert(mic_acc_.end(), in, in + data.size() / 2);
     send_acc_.clear();
     size_t off = 0;
     while (mic_acc_.size() - off >= (size_t) aec_chunk_) {
       std::memcpy(aec_in_, mic_acc_.data() + off, (size_t) aec_chunk_ * sizeof(int16_t));
-      ref_pop_(aec_ref_, aec_chunk_);  
-      aec_process(static_cast<const aec_handle_t *>(aec_handle_), aec_in_, aec_ref_, aec_out_);
+      ref_pop_(aec_ref_, aec_chunk_);
+      aec_process(static_cast(aec_handle_), aec_in_, aec_ref_, aec_out_);
       send_acc_.insert(send_acc_.end(), aec_out_, aec_out_ + aec_chunk_);
       off += aec_chunk_;
     }
     if (off > 0)
       mic_acc_.erase(mic_acc_.begin(), mic_acc_.begin() + off);
     if (!send_acc_.empty())
-      send_frame_(F2F_STREAM_AUDIO, reinterpret_cast<const uint8_t *>(send_acc_.data()),
+      send_frame_(F2F_STREAM_AUDIO, reinterpret_cast(send_acc_.data()),
                   send_acc_.size() * sizeof(int16_t), audio_sock_);
     return;
   }
@@ -710,7 +747,7 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
     return;
 #ifdef FACE2FACE_USE_AEC
   if (aec_ready_)
-    ref_push_(reinterpret_cast<const int16_t *>(pcm), len / 2);
+    ref_push_(reinterpret_cast(pcm), len / 2);
 #endif
   spk_->play(pcm, len);
 }
