@@ -342,10 +342,14 @@ void Face2Face::send_ping_() {
 }
 
 void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len, int sock) {
+  if (sock < 0 || data == nullptr || len == 0)
+    return;
   struct sockaddr_in dst {};
   dst.sin_family = AF_INET;
   dst.sin_port = htons(stream == F2F_STREAM_VIDEO ? video_port_ : audio_port_);
-  ::inet_aton(peer_ip_.c_str(), &dst.sin_addr);
+  // No peer configured yet (e.g. peer_ip still 0.0.0.0): don't send.
+  if (::inet_aton(peer_ip_.c_str(), &dst.sin_addr) == 0 || dst.sin_addr.s_addr == 0)
+    return;
 
   uint16_t frag_count = (len + F2F_MAX_PAYLOAD - 1) / F2F_MAX_PAYLOAD;
   if (frag_count == 0)
@@ -616,7 +620,12 @@ void Face2Face::pump_video_tx_() {
   camera_->release_buffer(el);
 
   if (!have_input) {
-    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", ow, oh);
+    // Throttle: this would otherwise log at the frame rate.
+    uint32_t now = millis();
+    if (now - last_enc_warn_ms_ > 1000) {
+      last_enc_warn_ms_ = now;
+      ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", ow, oh);
+    }
     return;
   }
   jpeg_encode_cfg_t cfg = {};
@@ -628,10 +637,15 @@ void Face2Face::pump_video_tx_() {
   uint32_t out_size = 0;
   esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
                                        out_bytes, enc_out_, enc_out_cap_, &out_size);
-  if (err == ESP_OK && out_size > 0)
+  if (err == ESP_OK && out_size > 0) {
     send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
-  else
-    ESP_LOGW(TAG, "jpeg encode failed: %d", err);
+  } else {
+    uint32_t now = millis();
+    if (now - last_enc_warn_ms_ > 1000) {
+      last_enc_warn_ms_ = now;
+      ESP_LOGW(TAG, "jpeg encode failed: %d", err);
+    }
+  }
 }
 
 bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {

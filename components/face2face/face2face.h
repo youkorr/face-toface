@@ -232,6 +232,7 @@ class Face2Face : public Component {
   uint16_t tx_video_frame_id_{0};
   uint16_t tx_audio_frame_id_{0};
   uint32_t last_tx_us_{0};
+  uint32_t last_enc_warn_ms_{0};  // throttle encode-error logs (per-frame)
 
   // presence
   uint32_t last_peer_rx_ms_{0};
