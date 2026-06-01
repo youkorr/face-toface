@@ -549,26 +549,32 @@ void Face2Face::pump_video_tx_() {
   // Resolution-agnostic: grow the DMA buffers to the ACTUAL camera frame size
   // (e.g. 1280x720) instead of rejecting frames that don't match width_/height_.
   size_t frame_bytes = (size_t) w * h * 2;
-  if (ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
-      ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
+  bool have_input = ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
+                    ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false);
+  if (have_input)
     std::memcpy(enc_in_, rgb, frame_bytes);
-    jpeg_encode_cfg_t cfg = {};
-    cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
-    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
-    cfg.image_quality = jpeg_quality_;
-    cfg.width = w;
-    cfg.height = h;
-    uint32_t out_size = 0;
-    esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
-                                         frame_bytes, enc_out_, enc_out_cap_, &out_size);
-    if (err == ESP_OK && out_size > 0)
-      send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
-    else
-      ESP_LOGW(TAG, "jpeg encode failed: %d", err);
-  } else {
-    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
-  }
+  // Release the camera buffer NOW, before the (slow) JPEG encode + network send.
+  // The camera only has 2 buffers; holding one during encode/send starves the
+  // sensor -> "get_current_rgb_frame: no buffer available" flood and choppy fps.
   camera_->release_buffer(el);
+
+  if (!have_input) {
+    ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", w, h);
+    return;
+  }
+  jpeg_encode_cfg_t cfg = {};
+  cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
+  cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+  cfg.image_quality = jpeg_quality_;
+  cfg.width = w;
+  cfg.height = h;
+  uint32_t out_size = 0;
+  esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
+                                       frame_bytes, enc_out_, enc_out_cap_, &out_size);
+  if (err == ESP_OK && out_size > 0)
+    send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
+  else
+    ESP_LOGW(TAG, "jpeg encode failed: %d", err);
 }
 
 bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
