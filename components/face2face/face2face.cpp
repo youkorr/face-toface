@@ -586,8 +586,12 @@ void Face2Face::pump_video_tx_() {
   // what the WiFi-over-SDIO link can actually sustain.
   int s = scale_ < 1 ? 1 : scale_;
   int ow = w / s, oh = h / s;
-  ow &= ~1;  // keep even dims for YUV420 subsampling
-  oh &= ~1;
+  // The hardware JPEG codec aligns dimensions to 16px. Round DOWN to a multiple
+  // of 16 on both sides so the encoder output and the peer's decoder output have
+  // the exact size we allocate (else decode fails: "buffer smaller than actual
+  // output size"). 426x240 -> 416x240, 400x400 -> 400x400.
+  ow &= ~15;
+  oh &= ~15;
   if (ow < 16 || oh < 16) { camera_->release_buffer(el); return; }
   size_t out_bytes = (size_t) ow * oh * 2;
   bool have_input = ensure_enc_buf(&enc_in_, &enc_in_cap_, out_bytes, true) &&
@@ -642,8 +646,11 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   if (jpeg_decoder_get_info(dec_in_, len, &info) != ESP_OK)
     return false;
 
-  size_t want = (size_t) info.width * info.height * 2;
-  // Grow the decoder output buffer to the decoded RGB565 size (any resolution).
+  // The HW decoder rounds width/height UP to a multiple of 16, so its output can
+  // be larger than info.width*info.height. Allocate for the aligned size.
+  uint32_t aw = (info.width + 15) & ~15u;
+  uint32_t ah = (info.height + 15) & ~15u;
+  size_t want = (size_t) aw * ah * 2;
   if (want == 0 || !ensure_dec_buf(&dec_out_, &dec_out_cap_, want, false))
     return false;
 
