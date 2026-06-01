@@ -340,7 +340,17 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     hdr->frag_index = f;
     hdr->payload_len = plen;
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
-    int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+    
+    int sent;
+    int retries = 0;
+    do {
+      sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+      if (sent < 0 && errno == EWOULDBLOCK) {
+        retries++;
+        vTaskDelay(1); // wait 1 tick for TX buffer to drain
+      }
+    } while (sent < 0 && errno == EWOULDBLOCK && retries < 20);
+
     if (sent < 0 && errno != EWOULDBLOCK) {
       ESP_LOGW(TAG, "sendto failed: errno %d", errno);
       break;
@@ -532,7 +542,15 @@ void Face2Face::pump_video_tx_() {
   size_t frame_bytes = (size_t) w * h * 2;
   if (ensure_enc_buf(&enc_in_, &enc_in_cap_, frame_bytes, true) &&
       ensure_enc_buf(&enc_out_, &enc_out_cap_, frame_bytes, false)) {
-    std::memcpy(enc_in_, rgb, frame_bytes);
+    // Camera typically provides Big-Endian RGB565. The hardware JPEG encoder
+    // expects Little-Endian. Swap the bytes so YUV conversion doesn't create
+    // massive artifacts and wrong colors.
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
+    uint16_t *dst = reinterpret_cast<uint16_t *>(enc_in_);
+    size_t pixels = w * h;
+    for (size_t i = 0; i < pixels; i++) {
+      dst[i] = (src[i] >> 8) | (src[i] << 8);
+    }
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
     cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
@@ -583,7 +601,15 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   size_t n = out_len < want ? out_len : want;
   if (remote_fb_.size() != want)
     remote_fb_.assign(want, 0);
-  std::memcpy(remote_fb_.data(), dec_out_, n);
+  
+  // Hardware JPEG decoder outputs Little-Endian RGB565.
+  // LVGL on ESPHome typically expects Big-Endian RGB565.
+  const uint16_t *src = reinterpret_cast<const uint16_t *>(dec_out_);
+  uint16_t *dst = reinterpret_cast<uint16_t *>(remote_fb_.data());
+  size_t pixels = n / 2;
+  for (size_t i = 0; i < pixels; i++) {
+    dst[i] = (src[i] >> 8) | (src[i] << 8);
+  }
   return true;
 }
 
