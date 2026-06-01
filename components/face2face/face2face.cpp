@@ -345,15 +345,17 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     int retries = 0;
     do {
       sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-      if (sent < 0 && errno == EWOULDBLOCK) {
+      if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
         retries++;
         vTaskDelay(1); // wait 1 tick for TX buffer to drain
+      } else {
+        break;
       }
-    } while (sent < 0 && errno == EWOULDBLOCK && retries < 20);
+    } while (retries < 20);
 
-    if (sent < 0 && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "sendto failed: errno %d", errno);
-      break;
+    if (sent < 0) {
+      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d", errno);
+      break; // Abort sending the rest of this frame
     }
   }
 }
