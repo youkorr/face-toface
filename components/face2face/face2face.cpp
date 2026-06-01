@@ -283,7 +283,9 @@ bool Face2Face::open_sockets_() {
     }
     int flags = ::fcntl(sock, F_GETFL, 0);
     ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    int rxbuf = 65536;
+    
+    // INCREASED to 128KB to handle large JPEGs from 800x800 resolution!
+    int rxbuf = 131072;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
 
     struct sockaddr_in addr {};
@@ -342,22 +344,26 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     hdr->payload_len = plen;
     std::memcpy(pkt + F2F_HEADER_SIZE, data + off, plen);
     
-    int sent;
-    do {
-      sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-      if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
-        if (millis() - start_ms > 100) {
-          ESP_LOGW(TAG, "Network completely stalled, dropping frame");
-          return; 
+    // DOUBLE LES PAQUETS (Redundancy: 2 copies instead of 3)
+    // For 800x800, 3 copies is too much data (300KB+ per frame) and crashes WiFi.
+    for (int copy = 0; copy < 2; copy++) {
+      int sent;
+      do {
+        sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
+        if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
+          if (millis() - start_ms > 200) {  
+            ESP_LOGW(TAG, "Network completely stalled, dropping frame");
+            return; 
+          }
+          vTaskDelay(pdMS_TO_TICKS(1));
+        } else {
+          break;
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
-      } else {
-        break;
-      }
-    } while (true);
+      } while (true);
 
-    if (sent < 0) {
-      return; // Abort sending the rest of this frame
+      if (sent < 0) {
+        return; // Abort sending the rest of this frame
+      }
     }
 
     // PACING: Wait 1ms every 8 packets (~11KB) to allow the receiver's ESPHome loop 
