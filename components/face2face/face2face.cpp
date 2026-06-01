@@ -625,7 +625,7 @@ bool Face2Face::aec_init_() {
 void Face2Face::aec_deinit_() {
 #ifdef FACE2FACE_USE_AEC
   if (aec_handle_ != nullptr) {
-    aec_destroy(static_cast<void *>(aec_handle_));
+    aec_destroy(static_cast<aec_handle_t *>(aec_handle_));
     aec_handle_ = nullptr;
   }
   if (aec_in_ != nullptr) { free(aec_in_); aec_in_ = nullptr; }
@@ -679,7 +679,7 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
     while (mic_acc_.size() - off >= (size_t) aec_chunk_) {
       std::memcpy(aec_in_, mic_acc_.data() + off, (size_t) aec_chunk_ * sizeof(int16_t));
       ref_pop_(aec_ref_, aec_chunk_);
-      aec_process(static_cast<void *>(aec_handle_), aec_in_, aec_ref_, aec_out_);
+      aec_process(static_cast<const aec_handle_t *>(aec_handle_), aec_in_, aec_ref_, aec_out_);
       send_acc_.insert(send_acc_.end(), aec_out_, aec_out_ + aec_chunk_);
       off += aec_chunk_;
     }
