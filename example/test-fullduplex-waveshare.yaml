@@ -57,7 +57,7 @@ esp32_hosted:
 
 external_components:
   - source: github://n-IA-hane/esphome-intercom@v2026.6.0
-    components: [esp_audio_stack, esp_afe, audio_processor]
+    components: [esp_audio_stack, esp_afe]
     refresh: always
 
 i2c:
@@ -67,8 +67,13 @@ i2c:
     frequency: 400kHz
 
 # --- Front-end audio (AEC matérielle) ---
-audio_processor:
-  - id: afe_processor
+esp_afe:
+  id: afe_processor
+  type: fd
+  mode: low_cost
+  mic_num: 2
+  input_format: MMNR
+  aec_enabled: true
 
 # --- UN SEUL driver I2S full-duplex (pins Waveshare P4 7B) ---
 esp_audio_stack:

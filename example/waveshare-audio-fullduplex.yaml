@@ -24,7 +24,7 @@
 
 external_components:
   - source: github://n-IA-hane/esphome-intercom@v2026.6.0
-    components: [esp_audio_stack, esp_afe, audio_processor]
+    components: [esp_audio_stack, esp_afe]
     refresh: always
   - source:
       type: git
@@ -34,8 +34,13 @@ external_components:
     refresh: always
 
 # Front-end audio (AEC matérielle). Voir le repo pour les options NS/VAD/AGC.
-audio_processor:
-  - id: afe_processor
+esp_afe:
+  id: afe_processor
+  type: fd
+  mode: low_cost
+  mic_num: 2
+  input_format: MMNR
+  aec_enabled: true
 
 # --- UN SEUL driver I2S full-duplex (remplace i2s_audio + dac + adc) ---------
 esp_audio_stack:
