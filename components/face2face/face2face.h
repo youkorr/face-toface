@@ -278,28 +278,28 @@ class Face2Face : public Component {
 template<typename... Ts> class CallAction : public Action<Ts...> {
  public:
   explicit CallAction(Face2Face *parent) : parent_(parent) {}
-  void play(const Ts &...x) override { this->parent_->call(); }
+  void play(const Ts &...x) override { ((void) x, ...); this->parent_->call(); }
  protected:
   Face2Face *parent_;
 };
 template<typename... Ts> class AnswerAction : public Action<Ts...> {
  public:
   explicit AnswerAction(Face2Face *parent) : parent_(parent) {}
-  void play(const Ts &...x) override { this->parent_->answer(); }
+  void play(const Ts &...x) override { ((void) x, ...); this->parent_->answer(); }
  protected:
   Face2Face *parent_;
 };
 template<typename... Ts> class HangupAction : public Action<Ts...> {
  public:
   explicit HangupAction(Face2Face *parent) : parent_(parent) {}
-  void play(const Ts &...x) override { this->parent_->hangup(); }
+  void play(const Ts &...x) override { ((void) x, ...); this->parent_->hangup(); }
  protected:
   Face2Face *parent_;
 };
 template<typename... Ts> class DeclineAction : public Action<Ts...> {
  public:
   explicit DeclineAction(Face2Face *parent) : parent_(parent) {}
-  void play(const Ts &...x) override { this->parent_->decline(); }
+  void play(const Ts &...x) override { ((void) x, ...); this->parent_->decline(); }
  protected:
   Face2Face *parent_;
 };
