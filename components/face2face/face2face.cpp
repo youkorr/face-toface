@@ -346,19 +346,16 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     
     int sent;
     do {
-      // Envoyer le paquet au maximum de la vitesse du composant WiFi
       sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
       
       if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
-        // Le tampon matériel WiFi est à 100% de saturation.
-        if (millis() - start_ms > 500) {  
+        if (millis() - start_ms > 100) {  
           ESP_LOGW(TAG, "Network completely stalled, dropping frame");
           return; 
         }
-        // Attendre le minimum vital pour que l'antenne vide son cache
         vTaskDelay(1); 
       } else {
-        break; // Paquet expédié !
+        break;
       }
     } while (true);
 
@@ -366,8 +363,12 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
       return; // Abort sending the rest of this frame
     }
     
-    // PLUS AUCUN FREIN ARTIFICIEL ICI !
-    // L'ESP32 va envoyer les données à sa vitesse maximale absolue.
+    // PACING (Indispensable) : On force une pause de 1 ms tous les 8 paquets (~11 Ko).
+    // Sans ça, la puce WiFi est saturée instantanément (ENOBUFS), ce qui gèle 
+    // l'ESP32 pendant 500 ms !
+    if ((f % 8) == 7) {
+      vTaskDelay(1);
+    }
   }
 }
 
@@ -558,8 +559,8 @@ void Face2Face::pump_video_tx_() {
     std::memcpy(enc_in_, rgb, frame_bytes);
     jpeg_encode_cfg_t cfg = {};
     cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
-    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV444; // QUALITÉ COULEUR MAXIMALE (au lieu de YUV420)
-    cfg.image_quality = 95; // QUALITÉ MAXIMALE FORCÉE (au lieu de jpeg_quality_ à 40)
+    cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV444; // Excellente qualité de couleur
+    cfg.image_quality = 80; // 80 est le "sweet spot" (95 génère un fichier de 300 Ko, impossible en WiFi)
     cfg.width = w;
     cfg.height = h;
     uint32_t out_size = 0;
