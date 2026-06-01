@@ -346,9 +346,9 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     do {
       sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
       if (sent < 0 && (errno == EWOULDBLOCK || errno == ENOBUFS)) {
-        if (millis() - start_ms > 30) {
-          ESP_LOGW(TAG, "Network congested, dropping frame (took > 30ms)");
-          return; // Abort sending the rest of this frame
+        if (millis() - start_ms > 100) {
+          ESP_LOGW(TAG, "Network completely stalled, dropping frame");
+          return; 
         }
         vTaskDelay(pdMS_TO_TICKS(1));
       } else {
@@ -357,8 +357,14 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     } while (true);
 
     if (sent < 0) {
-      ESP_LOGW(TAG, "sendto failed (dropped frame): errno %d", errno);
       return; // Abort sending the rest of this frame
+    }
+
+    // PACING: Wait 1ms every 8 packets (~11KB) to allow the receiver's ESPHome loop 
+    // to drain its 64KB UDP receive buffer. Without this, large JPEGs overflow the 
+    // receiver instantly, causing 99% packet loss.
+    if ((f % 8) == 7) {
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 }
@@ -739,5 +745,6 @@ void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
 
 }  // namespace face2face
 }  // namespace esphome
+
 
 
