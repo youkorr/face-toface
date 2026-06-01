@@ -73,7 +73,18 @@ esp_afe:
   mode: low_cost
   mic_num: 2
   input_format: MMNR
-  aec_enabled: true
+  aec_enabled: false
+  aec_off_output: raw_1
+  aec_filter_length: 4
+  aec_nlp_level: normal
+  se_enabled: true
+  ns_enabled: true
+  vad_enabled: false
+  continuous_vad: true
+  agc_enabled: false
+  feed_buf_in_psram: true
+  feed_ring_in_psram: true
+  fetch_ring_in_psram: true
 
 # --- UN SEUL driver I2S full-duplex (pins Waveshare P4 7B) ---
 esp_audio_stack:
