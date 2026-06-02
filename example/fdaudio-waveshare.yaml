@@ -1,0 +1,74 @@
+# =============================================================================
+# NOTRE composant audio full-duplex "fdaudio" — WAVESHARE ESP32-P4 7B
+# -----------------------------------------------------------------------------
+# 100% API Espressif (esp_driver_i2s + esp_codec_dev + esp-sr), AUCUNE
+# dépendance tierce (ni esp_audio_stack, ni esp_afe d'un particulier).
+#
+# Expose un microphone + speaker ESPHome standards -> voice_assistant /
+# media_player / face2face s'en servent sans modification.
+#
+# ⚠️ PREMIER JET : à valider/déboguer sur la carte (non compilable hors P4).
+#    Remplace dans waveshare.yaml : i2s_audio / audio_dac / audio_adc / les
+#    microphone+speaker i2s_audio.
+# =============================================================================
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio, face2face]
+    refresh: always
+
+# Le composant gère les codecs via VOTRE bus I2C (bsp_bus = SDA7/SCL8).
+i2c:
+  - id: bsp_bus
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 400kHz
+
+# --- Moteur audio full-duplex (un seul driver I2S, codecs Espressif) ---
+fdaudio:
+  id: audio_engine
+  # pins I2S Waveshare P4 7B
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0                 # bsp_bus = port I2C 0
+  output_codec: es8311        # ES8311 (HP) ; mettez es8388 pour le Habbit
+  output_address: 0x18
+  mic_address: 0x40           # ES7210
+  mic_gain_db: 37.5
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: true            # AEC esp-sr intégrée (réf = trame HP précédente)
+
+# --- micro + HP exposés à ESPHome ---
+microphone:
+  - platform: fdaudio
+    id: esp32_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: esp32_speaker
+    fdaudio_id: audio_engine
+
+# --- face2face : lit le micro DÉJÀ nettoyé par l'AEC de fdaudio ---
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  enable_audio: true
+  enable_aec: false           # AEC faite par fdaudio (ne pas la refaire)
+  scale: 2
+  jpeg_quality: 35
+  framerate: 12
+  swap_colors: true
+  ring_timeout: 30s
+
+# Votre media_player / voice_assistant / micro_wake_word se branchent sur
+# esp32_microphone / esp32_speaker SANS modification.
