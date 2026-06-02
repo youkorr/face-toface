@@ -107,10 +107,16 @@ bool FdAudio::init_codecs_() {
     return false;
   }
 
+  // esp_codec_dev expects the I2C address in 8-bit form (7-bit << 1), while
+  // YAML/ESPHome uses the standard 7-bit address (e.g. ES8311 0x18, ES7210
+  // 0x40). Shift left by 1 so "Fail to write to dev" goes away.
+  uint8_t out_addr8 = (uint8_t) (out_addr_ << 1);
+  uint8_t in_addr8 = (uint8_t) (in_addr_ << 1);
+
   // --- Output codec control (I2C) ---
   audio_codec_i2c_cfg_t out_i2c = {};
   out_i2c.port = (uint8_t) i2c_port_;
-  out_i2c.addr = out_addr_;
+  out_i2c.addr = out_addr8;
   out_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *out_ctrl = audio_codec_new_i2c_ctrl(&out_i2c);
 
@@ -145,7 +151,7 @@ bool FdAudio::init_codecs_() {
   // --- Mic codec ES7210 (I2C) ---
   audio_codec_i2c_cfg_t in_i2c = {};
   in_i2c.port = (uint8_t) i2c_port_;
-  in_i2c.addr = in_addr_;
+  in_i2c.addr = in_addr8;
   in_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *in_ctrl = audio_codec_new_i2c_ctrl(&in_i2c);
 
