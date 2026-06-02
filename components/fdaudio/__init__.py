@@ -84,9 +84,10 @@ async def to_code(config):
     esp32.add_idf_component(name="espressif/esp_codec_dev", ref="1.3.4")
 
     if config[CONF_ENABLE_AEC]:
-        # esp-sr v2.3.0 (esp-dsp 1.7.0-compatible). Bump if you align on 1.8.0.
+        # esp-sr master depends on esp-dsp 1.8.0 (matches the project override
+        # 'espressif/esp-dsp==1.8.0' and esp-dl >=1.7.0). aec_nlp_level etc.
         esp32.add_idf_component(
             name="esp-sr", repo="https://github.com/espressif/esp-sr",
-            ref="d0eaa31d7912ade2f40eda9890e18ae240d887cb",
+            ref="master",
         )
         cg.add_define("FDAUDIO_USE_AEC")
