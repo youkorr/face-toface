@@ -38,6 +38,7 @@ CONF_ENABLE_AUDIO = "enable_audio"
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_RING_TIMEOUT = "ring_timeout"
 CONF_AUTO_ANSWER = "auto_answer"
+CONF_RINGTONE = "ringtone"
 CONF_ENABLE_AEC = "enable_aec"
 CONF_AEC_MODE = "aec_mode"
 CONF_AEC_FILTER_LENGTH = "aec_filter_length"
@@ -95,6 +96,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUDIO_SAMPLE_RATE, default=16000): cv.int_,
         cv.Optional(CONF_RING_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_AUTO_ANSWER, default=False): cv.boolean,
+        cv.Optional(CONF_RINGTONE, default=True): cv.boolean,
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
         cv.Optional(CONF_AEC_MODE, default="sr_low_cost"): cv.enum(AEC_MODES, lower=True),
         cv.Optional(CONF_AEC_FILTER_LENGTH, default=4): cv.int_range(min=1, max=8),
@@ -123,6 +125,7 @@ async def to_code(config):
     cg.add(var.set_audio_sample_rate(config[CONF_AUDIO_SAMPLE_RATE]))
     cg.add(var.set_ring_timeout(config[CONF_RING_TIMEOUT]))
     cg.add(var.set_auto_answer(config[CONF_AUTO_ANSWER]))
+    cg.add(var.set_ringtone(config[CONF_RINGTONE]))
     cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
     cg.add(var.set_aec_mode(config[CONF_AEC_MODE]))
     cg.add(var.set_aec_filter_length(config[CONF_AEC_FILTER_LENGTH]))

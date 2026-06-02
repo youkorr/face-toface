@@ -114,6 +114,7 @@ class Face2Face : public Component {
   void set_aec_filter_length(int n) { aec_filter_length_ = n; }
   void set_audio_start_delay(uint32_t ms) { audio_start_delay_ms_ = ms; }
   void set_aec_mode(int m) { aec_mode_ = m; }
+  void set_ringtone(bool e) { ringtone_enabled_ = e; }
   void set_ring_timeout(uint32_t ms) { ring_timeout_ms_ = ms; }
   void set_auto_answer(bool a) { auto_answer_ = a; }
   void set_camera(esp_cam_sensor::MipiDSICamComponent *cam) { camera_ = cam; }
@@ -181,6 +182,10 @@ class Face2Face : public Component {
   void on_mic_data_(const std::vector<uint8_t> &data);
   void play_audio_(const uint8_t *pcm, uint32_t len);
 
+  // Synthesised ringtone (no audio file): plays on the speaker while OUTGOING
+  // (caller's "calling" beep) or RINGING (callee's incoming-call ring).
+  void pump_ringtone_();
+
   // acoustic echo cancellation (ESP-SR esp_aec)
   bool aec_init_();
   void aec_deinit_();
@@ -201,6 +206,7 @@ class Face2Face : public Component {
   uint32_t audio_sample_rate_{16000};
   uint32_t ring_timeout_ms_{30000};
   bool auto_answer_{false};
+  bool ringtone_enabled_{true};
   bool aec_enabled_{true};
   int aec_filter_length_{4};
   int aec_mode_{4};  // AEC_MODE_VOIP_HIGH_PERF
@@ -261,6 +267,9 @@ class Face2Face : public Component {
   size_t ref_head_{0};
   size_t ref_count_{0};
   uint32_t last_spk_ms_{0};  // last time the speaker played (AEC gating)
+  uint32_t ring_phase_{0};       // sample counter for tone synthesis
+  uint32_t last_ring_ms_{0};     // pacing for ringtone chunks
+  bool ring_spk_started_{false}; // did we start the speaker for the ringtone?
 
   // hardware JPEG handles + DMA buffers
   void *jpeg_enc_{nullptr};

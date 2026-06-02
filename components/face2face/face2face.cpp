@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 
 #include <cstring>
+#include <cmath>
 #include <cstdlib>
 
 // lwIP / POSIX sockets (ESP-IDF)
@@ -94,6 +95,10 @@ void Face2Face::loop() {
       send_ctrl_(CTRL_DECLINE);
     go_idle_();
   }
+
+  // Synthesised ringtone while setting up a call (no audio file needed).
+  if (ringtone_enabled_ && (state_ == STATE_OUTGOING || state_ == STATE_RINGING))
+    pump_ringtone_();
 
   // Deferred audio start (after the I2S bus is freed by the wake-word).
   // The ESPHome i2s driver retries its own start internally ("retrying in 1s"),
@@ -188,6 +193,12 @@ void Face2Face::hangup() {
 }
 
 void Face2Face::start_streaming_() {
+  // Stop the ringtone now that the call connects.
+  if (ring_spk_started_) {
+    if (spk_ != nullptr)
+      spk_->stop();
+    ring_spk_started_ = false;
+  }
   // Allocate the heavy media buffers now (freed again on hangup).
   if (!ensure_media_()) {
     ESP_LOGE(TAG, "Cannot start call: media allocation failed (low memory?)");
@@ -218,6 +229,7 @@ void Face2Face::go_idle_() {
   bool was_active = (state_ != STATE_IDLE);
   set_state_(STATE_IDLE);
   audio_due_ms_ = 0;  // cancel any pending deferred audio start
+  ring_spk_started_ = false;  // ringtone (if any) is stopped via spk_->stop() below
   if (audio_enabled_) {
     if (mic_ != nullptr && mic_started_) {
       mic_->stop();
@@ -820,6 +832,55 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
     mic_acc_.clear();
 #endif
   send_frame_(F2F_STREAM_AUDIO, data.data(), data.size(), audio_sock_);
+}
+
+void Face2Face::pump_ringtone_() {
+  if (spk_ == nullptr)
+    return;
+  // Start the speaker once for the duration of the ringing phase.
+  if (!ring_spk_started_) {
+    spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
+    spk_->start();
+    ring_spk_started_ = true;
+    ring_phase_ = 0;
+    last_ring_ms_ = 0;
+  }
+  // Feed ~40 ms chunks, paced so we don't overflow the speaker buffer.
+  uint32_t now = millis();
+  if (now - last_ring_ms_ < 30)
+    return;
+  last_ring_ms_ = now;
+
+  const uint32_t sr = audio_sample_rate_;
+  const size_t samples = sr / 25;  // 40 ms
+  static thread_local std::vector<int16_t> buf;
+  buf.resize(samples);
+
+  // Ring cadence: caller hears a softer 425 Hz tone; callee a louder 2-tone
+  // "ring ring ... pause" pattern. Period = 4 s: 1 s on, then off.
+  // We derive on/off from a wall-clock cycle so both phases line up.
+  uint32_t cycle = (now % 4000);
+  bool tone_on;
+  double freq;
+  if (state_ == STATE_RINGING) {
+    // callee: ring 0-400ms, gap, ring 600-1000ms, then silence to 4000ms
+    tone_on = (cycle < 400) || (cycle >= 600 && cycle < 1000);
+    freq = 1000.0;  // incoming ring, higher pitch
+  } else {  // STATE_OUTGOING (caller)
+    tone_on = (cycle < 1000);  // 1 s tone, 3 s gap = "ringback"
+    freq = 425.0;
+  }
+
+  for (size_t i = 0; i < samples; i++) {
+    int16_t s = 0;
+    if (tone_on) {
+      double t = (double) ring_phase_ / (double) sr;
+      s = (int16_t) (6000.0 * std::sin(2.0 * M_PI * freq * t));
+    }
+    buf[i] = s;
+    ring_phase_++;
+  }
+  spk_->play(reinterpret_cast<const uint8_t *>(buf.data()), samples * sizeof(int16_t));
 }
 
 void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
