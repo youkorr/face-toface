@@ -45,7 +45,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(FdAudio),
         cv.Required(CONF_LRCLK_PIN): pins.internal_gpio_output_pin_number,
         cv.Required(CONF_BCLK_PIN): pins.internal_gpio_output_pin_number,
-        cv.Optional(CONF_MCLK_PIN, default=-1): cv.int_,
+        cv.Optional(CONF_MCLK_PIN, default=-1): cv.Any(
+            cv.int_(-1), pins.internal_gpio_output_pin_number
+        ),
         cv.Required(CONF_DIN_PIN): pins.internal_gpio_input_pin_number,
         cv.Required(CONF_DOUT_PIN): pins.internal_gpio_output_pin_number,
         cv.Optional(CONF_I2C_PORT, default=0): cv.int_range(min=0, max=1),

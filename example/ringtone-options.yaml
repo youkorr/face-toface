@@ -1,0 +1,70 @@
+# =============================================================================
+# SONNERIE D'APPEL face2face — 3 options
+# -----------------------------------------------------------------------------
+# À mettre dans le bloc face2face: de votre YAML.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# OPTION 1 — Bip synthétisé intégré (par défaut, aucun fichier)
+# ---------------------------------------------------------------------------
+# Rien à faire : ringtone est true par défaut.
+#   face2face:
+#     ringtone: true        # bip généré (425Hz appelant / 1000Hz appelé)
+
+# ---------------------------------------------------------------------------
+# OPTION 2 — Aucune sonnerie (silencieux, visuel seulement)
+# ---------------------------------------------------------------------------
+#   face2face:
+#     ringtone: false
+
+# ---------------------------------------------------------------------------
+# OPTION 3 — VOTRE son (fichier sur SD/HTTP, via le media_player)
+# ---------------------------------------------------------------------------
+# 1) ringtone: false  -> on désactive le bip interne
+# 2) on joue VOTRE fichier sur on_ringing (appel entrant) et/ou
+#    on_outgoing_call (appelant), et on l'arrête sur on_streaming / on_idle.
+#
+# Exemple complet :
+
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  ringtone: false                 # <-- on coupe le bip interne, on met le nôtre
+  # ... vos autres options (scale, enable_aec, etc.) ...
+
+  on_outgoing_call:
+    # Appelant : tonalité d'attente (votre fichier), en boucle
+    - lvgl.page.show: call_page
+    - media_player.play_media: "http://192.168.1.38:8123/local/ringback.mp3"
+    # (ou un fichier SD : "/sdcard/sounds/ringback.flac" selon votre media_player)
+
+  on_ringing:
+    # Appel entrant : VOTRE sonnerie, en boucle
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+    - media_player.play_media: "http://192.168.1.38:8123/local/ringtone.mp3"
+
+  on_streaming:
+    # Appel établi : on coupe la sonnerie
+    - media_player.stop:
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+
+  on_idle:
+    # Fin/refus/timeout : on coupe la sonnerie
+    - media_player.stop:
+    - lvgl.widget.hide: incoming_overlay
+
+# -----------------------------------------------------------------------------
+# NOTES :
+# - "media_player.play_media" joue sur votre speaker_media_player (donc votre
+#   speaker fdaudio / esp32_speaker). Mettez l'URL/chemin de VOTRE son.
+# - Pour une vraie boucle (sonnerie qui se répète tant que ça sonne), utilisez
+#   un script avec while + délai, ou un fichier déjà long/bouclé. La plupart des
+#   gens mettent un fichier de 3-5 s qui suffit pour une sonnerie.
+# - Le bip synthétisé (option 1) ne nécessite RIEN et marche tout de suite ; le
+#   fichier perso (option 3) demande un media_player fonctionnel (TTS/MP3 déjà OK
+#   chez vous).
+# -----------------------------------------------------------------------------
