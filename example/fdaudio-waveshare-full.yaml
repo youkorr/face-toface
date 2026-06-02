@@ -140,7 +140,10 @@ media_player:
     announcement_pipeline:
       speaker: esp32_speaker
       format: FLAC
-      sample_rate: 48000
+      # fdaudio est full-duplex : mic + speaker partagent UNE horloge I2S à
+      # 16 kHz. Le pipeline doit donc cibler 16000 (il rééchantillonne le TTS
+      # 48k->16k avant l'envoi). 48000 ici => erreur de validation du speaker.
+      sample_rate: 16000
       num_channels: 1
 
 micro_wake_word:
