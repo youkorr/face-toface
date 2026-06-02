@@ -31,6 +31,8 @@ CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
 CONF_USE_MCLK = "use_mclk"
 CONF_ENABLE_AEC = "enable_aec"
+CONF_CODEC_SAMPLE_RATE = "codec_sample_rate"
+CONF_MIC_DIGITAL_GAIN = "mic_digital_gain"
 
 fdaudio_ns = cg.esphome_ns.namespace("fdaudio")
 FdAudio = fdaudio_ns.class_("FdAudio", cg.Component)
@@ -62,7 +64,15 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MIC_CHANNELS, default=1): cv.int_range(min=1, max=15),
         cv.Optional(CONF_OUTPUT_VOLUME, default=70): cv.int_range(min=0, max=100),
         cv.Optional(CONF_USE_MCLK, default=True): cv.boolean,
+        # Rate exposed to ESPHome (mic output / voice_assistant / face2face).
         cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_,
+        # Actual I2S/codec clock. Many ESP32-P4 boards only clock the ES7210 mic
+        # correctly at 48 kHz, so the engine runs the codec at 48 kHz and
+        # decimates the mic down to 'sample_rate'. Must be an integer multiple.
+        cv.Optional(CONF_CODEC_SAMPLE_RATE, default=48000): cv.int_,
+        # Software boost applied to the (decimated) mic. Raise if the voice is
+        # too weak for wake word / STT (your AFE used AGC for the same reason).
+        cv.Optional(CONF_MIC_DIGITAL_GAIN, default=1.0): cv.float_range(min=1.0, max=16.0),
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -77,6 +87,8 @@ async def to_code(config):
         config[CONF_DIN_PIN], config[CONF_DOUT_PIN],
     ))
     cg.add(var.set_sample_rate(config[CONF_SAMPLE_RATE]))
+    cg.add(var.set_codec_sample_rate(config[CONF_CODEC_SAMPLE_RATE]))
+    cg.add(var.set_mic_digital_gain(config[CONF_MIC_DIGITAL_GAIN]))
     cg.add(var.set_i2c_port(config[CONF_I2C_PORT]))
     cg.add(var.set_output_codec(config[CONF_OUTPUT_CODEC]))
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))

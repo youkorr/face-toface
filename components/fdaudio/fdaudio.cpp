@@ -32,7 +32,9 @@ void FdAudio::dump_config() {
   ESP_LOGCONFIG(TAG, "fdaudio:");
   ESP_LOGCONFIG(TAG, "  I2S: mclk=%d bclk=%d lrclk=%d din=%d dout=%d", mclk_pin_, bclk_pin_,
                 lrclk_pin_, din_pin_, dout_pin_);
-  ESP_LOGCONFIG(TAG, "  Sample rate: %u Hz", sample_rate_);
+  ESP_LOGCONFIG(TAG, "  Codec/I2S rate: %u Hz, mic output: %u Hz (decim %u:1)", codec_rate_,
+                mic_rate_, codec_rate_ / mic_rate_);
+  ESP_LOGCONFIG(TAG, "  Mic digital gain: x%.2f", mic_digital_gain_);
   ESP_LOGCONFIG(TAG, "  Output codec: %s (0x%02X), mic ES7210 (0x%02X)",
                 out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388", out_addr_, in_addr_);
   ESP_LOGCONFIG(TAG, "  AEC: %s", aec_enabled_ ? "enabled" : "off");
@@ -54,7 +56,7 @@ bool FdAudio::init_i2s_() {
   }
 
   i2s_std_config_t std_cfg = {
-      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate_),
+      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(codec_rate_),
       .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
       .gpio_cfg = {
           .mclk = (gpio_num_t) mclk_pin_,
@@ -179,11 +181,13 @@ bool FdAudio::init_codecs_() {
     return false;
   }
 
-  // Open both at the same PCM format (16-bit mono).
+  // Open both at the same PCM format (16-bit mono) at the CODEC clock rate.
+  // The mic is later decimated to mic_rate_ for ESPHome; the speaker is fed at
+  // codec_rate_ directly. This matches the board's known-working 48 kHz setup.
   esp_codec_dev_sample_info_t fs = {};
   fs.bits_per_sample = 16;
   fs.channel = 1;
-  fs.sample_rate = sample_rate_;
+  fs.sample_rate = codec_rate_;
   esp_codec_dev_open((esp_codec_dev_handle_t) out_dev_, &fs);
   esp_codec_dev_open((esp_codec_dev_handle_t) in_dev_, &fs);
   esp_codec_dev_set_out_vol((esp_codec_dev_handle_t) out_dev_, out_volume_);
@@ -200,7 +204,8 @@ bool FdAudio::init_aec_() {
 #ifdef FDAUDIO_USE_AEC
   if (!aec_enabled_ || aec_ready_)
     return aec_ready_;
-  aec_handle_ = aec_create((int) sample_rate_, 4, 1, AEC_MODE_SR_LOW_COST);
+  // AEC runs on the decimated mic output (mic_rate_, e.g. 16 kHz).
+  aec_handle_ = aec_create((int) mic_rate_, 4, 1, AEC_MODE_SR_LOW_COST);
   if (aec_handle_ == nullptr) {
     ESP_LOGW(TAG, "aec_create failed; mic will be raw");
     return false;
@@ -284,14 +289,38 @@ void FdAudio::engine_stop() {
 size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
   if (in_dev_ == nullptr)
     return 0;
+
+  // The codec runs at codec_rate_ (e.g. 48 kHz) but ESPHome wants mic_rate_
+  // (e.g. 16 kHz). Read decim x more samples and average each group down.
+  uint32_t decim = codec_rate_ / mic_rate_;
+  if (decim < 1)
+    decim = 1;
+  size_t out_samples = len / 2;               // requested 16 kHz samples
+  size_t in_samples = out_samples * decim;    // codec-rate samples to read
+  if (mic_scratch_.size() < in_samples)
+    mic_scratch_.resize(in_samples);
+
   // esp_codec_dev_read returns a STATUS code (ESP_CODEC_DEV_OK == 0 on success),
-  // NOT a byte count. On success it has filled the whole `len` buffer (blocking).
-  int ret = esp_codec_dev_read((esp_codec_dev_handle_t) in_dev_, dst, (int) len);
+  // NOT a byte count. On success it has filled the whole buffer (blocking).
+  int ret = esp_codec_dev_read((esp_codec_dev_handle_t) in_dev_, mic_scratch_.data(),
+                               (int) (in_samples * sizeof(int16_t)));
   if (ret != ESP_CODEC_DEV_OK)
     return 0;
-  size_t got = len;
+
+  int16_t *out = reinterpret_cast<int16_t *>(dst);
+  for (size_t i = 0; i < out_samples; i++) {
+    int32_t acc = 0;
+    for (uint32_t k = 0; k < decim; k++)
+      acc += mic_scratch_[i * decim + k];
+    int32_t s = (int32_t) ((acc / (int32_t) decim) * mic_digital_gain_);  // decimate + boost
+    if (s > 32767) s = 32767;
+    if (s < -32768) s = -32768;
+    out[i] = (int16_t) s;
+  }
+  size_t got = out_samples * sizeof(int16_t);
+
   if (aec_enabled_)
-    run_aec_(reinterpret_cast<int16_t *>(dst), got / 2);
+    run_aec_(out, got / 2);
 
   // Throttled mic level meter: tells us whether the codec returns real audio
   // (peak moves when you talk) or constant silence (codec/wiring issue).
@@ -314,13 +343,20 @@ void FdAudio::write_speaker(const uint8_t *src, size_t len) {
   if (out_dev_ == nullptr || len == 0)
     return;
 #ifdef FDAUDIO_USE_AEC
-  // Store the far-end frame we are about to play as the echo reference.
+  // Store the far-end frame as the echo reference, decimated to mic_rate_ so it
+  // aligns with the (decimated) mic before AEC.
   if (aec_ready_) {
     const int16_t *s = reinterpret_cast<const int16_t *>(src);
     size_t n = len / 2;
-    for (size_t i = 0; i < n; i++) {
+    uint32_t decim = codec_rate_ / mic_rate_;
+    if (decim < 1)
+      decim = 1;
+    for (size_t i = 0; i + decim <= n; i += decim) {
+      int32_t acc = 0;
+      for (uint32_t k = 0; k < decim; k++)
+        acc += s[i + k];
       size_t t = (ref_head_ + ref_count_) % ref_ring_.size();
-      ref_ring_[t] = s[i];
+      ref_ring_[t] = (int16_t) (acc / (int32_t) decim);
       if (ref_count_ < ref_ring_.size())
         ref_count_++;
       else

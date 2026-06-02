@@ -13,17 +13,18 @@ FdAudioSpeaker = fdaudio_ns.class_(
 
 
 def _set_stream_limits(config):
-    # fdaudio shares ONE I2S clock between mic and speaker (full-duplex), so the
-    # speaker must run at the same 16 kHz as the mic. Forcing min=max=16000 makes
-    # the media_player/pipeline resample (e.g. 48k TTS -> 16k) before sending,
-    # instead of playing 48k data at 16k (= 3x too slow).
+    # fdaudio shares ONE I2S clock between mic and speaker (full-duplex). The
+    # engine clocks the codec at 48 kHz (the rate that clocks the ES7210 mic
+    # correctly on these boards) and decimates the mic to 16 kHz internally.
+    # The speaker therefore plays at 48 kHz: force min=max=48000 so the
+    # media_player/pipeline targets 48 kHz (normal-speed playback, no resample).
     audio.set_stream_limits(
         min_bits_per_sample=16,
         max_bits_per_sample=16,
         min_channels=1,
         max_channels=1,
-        min_sample_rate=16000,
-        max_sample_rate=16000,
+        min_sample_rate=48000,
+        max_sample_rate=48000,
     )(config)
     return config
 

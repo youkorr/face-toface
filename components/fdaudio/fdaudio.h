@@ -39,12 +39,14 @@ class FdAudio : public Component {
   void set_pins(int mclk, int bclk, int lrclk, int din, int dout) {
     mclk_pin_ = mclk; bclk_pin_ = bclk; lrclk_pin_ = lrclk; din_pin_ = din; dout_pin_ = dout;
   }
-  void set_sample_rate(uint32_t r) { sample_rate_ = r; }
+  void set_sample_rate(uint32_t r) { mic_rate_ = r; }              // mic output (ESPHome-facing)
+  void set_codec_sample_rate(uint32_t r) { codec_rate_ = r; }      // actual I2S/codec clock
   void set_i2c_port(int p) { i2c_port_ = p; }
   void set_output_codec(OutputCodec c) { out_codec_ = c; }
   void set_codec_addrs(uint8_t out_addr, uint8_t in_addr) { out_addr_ = out_addr; in_addr_ = in_addr; }
   void set_mic_gain_db(float g) { mic_gain_db_ = g; }
   void set_mic_channels(uint8_t m) { mic_channels_ = m; }
+  void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
   void set_out_volume(int v) { out_volume_ = v; }
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -54,7 +56,7 @@ class FdAudio : public Component {
   void engine_stop();
   bool engine_running() const { return running_; }
 
-  // ---- Mic read / speaker write (16-bit mono PCM at sample_rate_) ----
+  // ---- Mic read (16-bit mono at mic_rate_) / speaker write (at codec_rate_) ----
   // Returns bytes actually read/written. Mic data is AEC-cleaned if enabled.
   size_t read_mic(uint8_t *dst, size_t len);
   void write_speaker(const uint8_t *src, size_t len);
@@ -68,7 +70,10 @@ class FdAudio : public Component {
 
   // config
   int mclk_pin_{-1}, bclk_pin_{-1}, lrclk_pin_{-1}, din_pin_{-1}, dout_pin_{-1};
-  uint32_t sample_rate_{16000};
+  uint32_t mic_rate_{16000};     // rate exposed to ESPHome (mic output, VA/face2face)
+  uint32_t codec_rate_{48000};   // actual I2S + codec clock (matches working board config)
+  std::vector<int16_t> mic_scratch_;  // codec-rate read buffer before decimation
+  float mic_digital_gain_{1.0f};      // software boost for weak mic (AGC-lite)
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};
