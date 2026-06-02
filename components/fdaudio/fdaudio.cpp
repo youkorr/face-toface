@@ -3,6 +3,9 @@
 
 #include <cstring>
 
+// ESP-IDF new I2C master driver (to reuse ESPHome's bus by port).
+#include "driver/i2c_master.h"
+
 // esp_codec_dev (Espressif managed component, pulled in __init__.py)
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -95,10 +98,20 @@ bool FdAudio::init_codecs_() {
 
   gpio_if_ = (void *) audio_codec_new_gpio();
 
+  // Reuse the I2C bus ESPHome already created on this port, instead of letting
+  // esp_codec_dev create a second one (which aborts: "driver_ng is not allowed
+  // to be used with this old driver" / bus conflict).
+  i2c_master_bus_handle_t i2c_bus = nullptr;
+  if (i2c_master_get_bus_handle((i2c_port_t) i2c_port_, &i2c_bus) != ESP_OK || i2c_bus == nullptr) {
+    ESP_LOGE(TAG, "could not get ESPHome I2C bus handle on port %d", i2c_port_);
+    return false;
+  }
+
   // --- Output codec control (I2C) ---
   audio_codec_i2c_cfg_t out_i2c = {};
   out_i2c.port = (uint8_t) i2c_port_;
   out_i2c.addr = out_addr_;
+  out_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *out_ctrl = audio_codec_new_i2c_ctrl(&out_i2c);
 
   if (out_codec_ == OUT_ES8311) {
@@ -133,6 +146,7 @@ bool FdAudio::init_codecs_() {
   audio_codec_i2c_cfg_t in_i2c = {};
   in_i2c.port = (uint8_t) i2c_port_;
   in_i2c.addr = in_addr_;
+  in_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *in_ctrl = audio_codec_new_i2c_ctrl(&in_i2c);
 
   es7210_codec_cfg_t mic_cfg = {};
