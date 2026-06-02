@@ -1,136 +1,29 @@
 # =============================================================================
 # AUDIO FULL-DUPLEX — WAVESHARE ESP32-P4 7B — via esp_audio_stack
 # -----------------------------------------------------------------------------
-# RÉSOUT le "Parent bus is busy" : micro + HP partagent un seul bus I2S, et
-# ESPHome interdit 2 composants i2s_audio actifs dessus simultanément (le HP
-# ne démarre jamais pendant un appel). Solution (n-IA-hane/esphome-intercom
-# v2026.6.0) : esp_audio_stack = UN seul driver qui possède le bus I2S en
-# full-duplex et expose microphone + speaker STANDARDS + AEC matérielle (TDM).
-#
-# ✅ COMPATIBLE AVEC VOTRE STACK VA : esp_audio_stack fournit un microphone et
-#    un speaker ESPHome normaux. En gardant les MÊMES ids (esp32_microphone /
-#    esp32_speaker), toute votre chaîne reste INCHANGÉE :
-#       mixer / resampler / media_player / voice_assistant / micro_wake_word
-#    s'empilent par-dessus exactement comme avant.
-#
-# ⚠️ CE QUE VOUS REMPLACEZ dans waveshare.yaml (UNIQUEMENT ces blocs) :
-#       - i2s_audio:        (tout le bloc)
-#       - audio_dac:        (es8311)
-#       - audio_adc:        (es7210)
-#       - microphone: -> le SEUL item "platform: i2s_audio" (esp32_microphone)
-#       - speaker:    -> le SEUL item "platform: i2s_audio" (esp32_speaker)
-#    GARDEZ les blocs mixer/resampler/media_player/voice_assistant/mWW tels quels.
-#
-# ⚠️⚠️ CONFLIT esp-sr — TRÈS IMPORTANT ⚠️⚠️
-# esp_audio_stack tire DÉJÀ esp-sr (pour son AEC matérielle). Si face2face a
-# aussi enable_aec: true, il tire un 2e esp-sr -> erreur de build :
-#   "Requirement esp-sr and espressif__esp-sr are both added"
-# => Avec esp_audio_stack, face2face DOIT avoir enable_aec: false (ci-dessous).
-#    L'écho est annulé par le SE/BSS dual-mic de esp_afe, pas par face2face.
-# =============================================================================
-
-external_components:
-  - source: github://n-IA-hane/esphome-intercom@v2026.6.0
-    components: [esp_audio_stack, esp_afe]
-    refresh: always
-  - source:
-      type: git
-      url: https://github.com/youkorr/face-toface
-      ref: claude/esp32p4-video-communication-W0yEc
-    components: [face2face]
-    refresh: always
-
-# Front-end audio (AEC matérielle). Voir le repo pour les options NS/VAD/AGC.
-esp_afe:
-  id: afe_processor
-  type: fd
-  mode: low_cost
-  mic_num: 2
-  input_format: MMNR
-  aec_enabled: false
-  aec_off_output: raw_1
-  aec_filter_length: 4
-  aec_nlp_level: normal
-  se_enabled: true
-  ns_enabled: true
-  vad_enabled: false
-  continuous_vad: true
-  agc_enabled: false
-  feed_buf_in_psram: true
-  feed_ring_in_psram: true
-  fetch_ring_in_psram: true
-
-# --- UN SEUL driver I2S full-duplex (remplace i2s_audio + dac + adc) ---------
-esp_audio_stack:
-  id: audio_stack
-  audio_task_stack_in_psram: true
-  i2s_lrclk_pin: GPIO10
-  i2s_bclk_pin: GPIO12
-  i2s_mclk_pin: GPIO13
-  i2s_din_pin: GPIO11
-  i2s_dout_pin: GPIO9
-  sample_rate: 48000
-  output_sample_rate: 16000
-  processor_id: afe_processor
-  codec:
-    i2c_id: bsp_bus              # votre bus I2C existant (SDA7/SCL8)
-    input:
-      type: es7210
-      address: 0x40
-      mic_selected: 0x0F
-      gain_db: 30.0
-      ref_channel: 1
-      ref_gain_db: 0.0
-    output:
-      type: es8311
-      address: 0x18
-      use_mclk: true
-      no_dac_ref: true
-  slot_bit_width: 16
-  use_tdm_reference: true        # référence d'écho MATÉRIELLE (AEC propre)
-  tdm_total_slots: 4
-  tdm_mic_slots: [0, 2]
-  tdm_ref_slot: 1
-  buffers_in_psram: true
-
-# --- mic + HP exposés par le stack, MÊMES ids qu'avant ----------------------
-# => votre mixer / resampler / media_player / voice_assistant marchent sans
-#    modification (ils référencent esp32_microphone et esp32_speaker).
-microphone:
-  - platform: esp_audio_stack
-    id: esp32_microphone
-    esp_audio_stack_id: audio_stack
-
-speaker:
-  - platform: esp_audio_stack
-    id: esp32_speaker
-    esp_audio_stack_id: audio_stack
-    sample_rate: 48000
-
-  # >>> GARDEZ vos blocs existants tels quels juste après <<< :
-  # - platform: mixer        (mixing_speaker -> output_speaker: esp32_speaker)
-  # - platform: resampler    (announcement_resampling_speaker / media_resampling_speaker)
-
-# --- face2face : audio géré par le stack (AEC matérielle) -------------------
-# enable_aec: false car esp_audio_stack fait DÉJÀ l'AEC matérielle (ne pas la
-# faire deux fois). Le HP de l'appel : utilisez media_resampling_speaker comme
-# avant (il s'empile sur esp32_speaker).
 face2face:
   id: f2f
   camera_id: tab5_cam
   microphone_id: esp32_microphone
-  speaker_id: media_resampling_speaker
+  speaker_id: esp32_speaker
   enable_audio: true
   audio_sample_rate: 16000
-  enable_aec: false              # AEC déléguée au matériel (esp_audio_stack)
-  audio_start_delay: 300ms       # un seul driver de bus -> plus de "bus busy"
+  # --- Vidéo : downscale pour tenir sur le WiFi-over-SDIO ---
+  # OV5647 sort en 800x800. scale 2 -> 400x400 (quelques Ko/image).
   scale: 2
   jpeg_quality: 35
   framerate: 12
   swap_colors: true
+  # --- Audio / appel ---
   ring_timeout: 30s
+  audio_start_delay: 1500ms
+  enable_aec: true
+  aec_mode: sr_low_cost      # recommandé par Espressif : préserve le wake-word
+  aec_filter_length: 4
   on_ringing:
     - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
     - lvgl.page.show: call_page
   on_streaming:
     - micro_wake_word.stop:
@@ -142,6 +35,209 @@ face2face:
     - lambda: "id(camera_display)->set_enabled(true);"
     - micro_wake_word.start:
     - lvgl.widget.hide: incoming_overlay
+
+# Présence : l'autre carte est-elle joignable (heartbeat UDP de face2face) ?
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+# Boutons d'appel (Home Assistant + utilisables ailleurs)
+button:
+  - platform: template
+    name: "Appeler"
+    on_press:
+      - face2face.call: f2f
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - face2face.answer: f2f
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - face2face.hangup: f2f
+
+  #- platform: template
+    #name: "FD: dire une phrase"
+    #on_press:
+      #- voice_assistant.start:
+
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    icon: "mdi:ip-network"
+    mode: text
+    optimistic: true
+    restore_value: true
+    min_length: 7
+    max_length: 15
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
+
+###########################################################################################################################
+# AUDIO AEC
+###########################################################################################################################
+# Echo Cancellation
+
+
+esp_afe:
+  id: afe_processor
+  type: fd
+  mode: low_cost
+  mic_num: 1
+  input_format: MNR         # 1 mic (M) + unused (N) + reference (R)
+  aec_enabled: true
+  aec_off_output: raw_0     # single mic -> raw_0
+  se_enabled: false         # SE/BSS inutile en mono
+  ns_enabled: true
+  vad_enabled: false
+  continuous_vad: true
+  agc_enabled: true         # gain auto : relève la voix faible (fix stt-no-text)
+  feed_buf_in_psram: true
+  feed_ring_in_psram: true
+  fetch_ring_in_psram: true
+
+# --- UN SEUL driver I2S full-duplex (pins Waveshare P4 7B) ---
+esp_audio_stack:
+  id: audio_stack
+  audio_task_stack_in_psram: true
+  i2s_lrclk_pin: GPIO10
+  i2s_bclk_pin: GPIO12
+  i2s_mclk_pin: GPIO13
+  i2s_din_pin: GPIO11
+  i2s_dout_pin: GPIO9
+  sample_rate: 48000
+  output_sample_rate: 16000
+  correct_dc_offset: true
+  aec_reference: previous_frame
+  processor_id: afe_processor
+  codec:
+    i2c_id: bsp_bus
+    input:
+      type: es7210
+      address: 0x40
+      mic_selected: 0x01      # 1 seul micro (canal 0)
+      gain_db: 37.5     # gain micro élevé (ES7210 max ~42dB)
+    output:
+      type: es8311
+      address: 0x18
+      use_mclk: true
+      no_dac_ref: true
+  slot_bit_width: 16
+  use_tdm_reference: false   # pas de TDM : référence d'écho logicielle
+  buffers_in_psram: true
+
+microphone:
+  - platform: esp_audio_stack
+    id: esp32_microphone
+    esp_audio_stack_id: audio_stack
+
+
+speaker:
+  - platform: esp_audio_stack
+    id: esp32_speaker
+    esp_audio_stack_id: audio_stack
+    sample_rate: 48000
+    #buffer_duration: 100ms
+
+
+
+media_player:
+  - platform: speaker
+    name: "ESP32 P4 Media Player"
+    id: speaker_media_player
+    #task_stack_in_psram: true
+    volume_min: 0.5
+    volume_max: 0.75
+    volume_increment: 0.05
+    announcement_pipeline:
+      speaker: esp32_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    on_announcement:
+      # Stop the wake word (mWW or VA) if the mic is capturing
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - micro_wake_word.stop:
+      - switch.turn_on: audio_amplifier              
+    on_idle:
+      # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - micro_wake_word.start:
+      - switch.turn_off: audio_amplifier
+
+micro_wake_word:
+  id: mww
+  models:
+    #- model: alexa
+    - okay_nabu
+  on_wake_word_detected:
+    - lvgl.page.show: test_page
+    #- lvgl.lottie.play_marker:
+        #id: va_orb
+        #marker: "alert"
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+
+voice_assistant:
+  id: va
+  microphone: esp32_microphone
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  #noise_suppression_level: 2
+  #auto_gain: 31dBFS
+  #volume_multiplier: 2.0
+  #conversation_timeout: 300s
+  # PAS de stop micro pendant la réponse : on VEUT vérifier le full-duplex.
+  on_tts_start:
+    #- logger.log: "TTS en cours — DITES LE MOT D'EVEIL MAINTENANT pour tester le full-duplex"
+    #- switch.turn_on: audio_amplifier      # ← AJOUTER en premier
+    - delay: 100ms                          # ← laisse l'ampli s'établir
+    - lvgl.page.show: test_page
+    - component.update: main_display
+  on_end:
+    #- switch.turn_off: audio_amplifier    
+    - wait_until:
+        condition:         
+          - media_player.is_announcing:
+        timeout: 0.5s
+    - wait_until:
+        - and:
+            - not:
+                media_player.is_announcing:
+            - not:
+                media_player.is_playing:
+    - lvgl.page.show: test_page
+    - component.update: main_display
+    #- lvgl.lottie.play_marker:
+        #id: va_orb
+        #marker: "idle"
+    - micro_wake_word.start:
+
+  on_error:
+    - lvgl.page.show: page_home
+    #- component.update: main_display
+    #- lvgl.lottie.play_marker:
+        #id: va_orb
+        #marker: "no"
+        #one_shot: true
+
+  on_client_connected:
+    - micro_wake_word.start:
+  on_client_disconnected:
+    - micro_wake_word.stop:
 
 # -----------------------------------------------------------------------------
 # IMPORTANT : les champs exacts d'esp_audio_stack / audio_processor peuvent
