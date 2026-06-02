@@ -307,10 +307,29 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
   // NOT a byte count. On success it has filled the whole buffer (blocking).
   int ret = esp_codec_dev_read((esp_codec_dev_handle_t) in_dev_, mic_scratch_.data(),
                                (int) (in_samples * sizeof(int16_t)));
+
+  int16_t *out = reinterpret_cast<int16_t *>(dst);
+  int32_t raw_peak = 0;
+  if (ret == ESP_CODEC_DEV_OK) {
+    for (size_t j = 0; j < in_samples; j++) {
+      int32_t a = mic_scratch_[j] < 0 ? -mic_scratch_[j] : mic_scratch_[j];
+      if (a > raw_peak)
+        raw_peak = a;
+    }
+  }
+
+  // Loud, unmissable diagnostic for the first reads (INFO so it shows without
+  // DEBUG): confirms read_mic runs, the codec read status, and the RAW codec
+  // level BEFORE any decimation/gain. raw_peak ~0 => codec gives silence.
+  static uint32_t first = 0;
+  if (first < 10) {
+    first++;
+    ESP_LOGI(TAG, "mic read #%u: ret=%d raw_peak=%d (read %u codec samples)", (unsigned) first,
+             ret, (int) raw_peak, (unsigned) in_samples);
+  }
   if (ret != ESP_CODEC_DEV_OK)
     return 0;
 
-  int16_t *out = reinterpret_cast<int16_t *>(dst);
   for (size_t i = 0; i < out_samples; i++) {
     int32_t acc = 0;
     for (uint32_t k = 0; k < decim; k++)
