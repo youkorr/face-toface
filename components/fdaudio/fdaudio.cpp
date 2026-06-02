@@ -1,5 +1,6 @@
 #include "fdaudio.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"  // millis()
 
 #include <cstring>
 
@@ -344,12 +345,47 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
   if (aec_enabled_)
     run_aec_(out, got / 2);
 
+  // --- Duplex confirmation log ---------------------------------------------
+  // Compute the mic level (post-AEC) and, if the speaker played within the last
+  // ~150 ms, report that mic + speaker are running AT THE SAME TIME (= true
+  // full-duplex). This also shows whether your "ok nabu" is audible over the
+  // residual speaker echo during TTS (key for barge-in).
+  int32_t mic_peak = 0;
+  for (size_t i = 0; i < got / 2; i++) {
+    int32_t a = out[i] < 0 ? -out[i] : out[i];
+    if (a > mic_peak)
+      mic_peak = a;
+  }
+  static uint32_t dlog = 0;
+  const bool spk_on = (millis() - last_spk_ms_) < 150;
+  if ((dlog++ & 0x0F) == 0) {  // ~ every 16 reads
+    if (spk_on) {
+      ESP_LOGI(TAG, "DUPLEX (HP+micro simultanes): mic_peak=%d  spk_peak=%d", (int) mic_peak,
+               (int) last_spk_peak_);
+    } else {
+      ESP_LOGD(TAG, "micro seul: peak=%d", (int) mic_peak);
+    }
+  }
+
   return got;
 }
 
 void FdAudio::write_speaker(const uint8_t *src, size_t len) {
   if (out_dev_ == nullptr || len == 0)
     return;
+  // Mark that the speaker is active right now (for the duplex log in read_mic).
+  {
+    const int16_t *s = reinterpret_cast<const int16_t *>(src);
+    size_t n = len / 2;
+    int32_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+      int32_t a = s[i] < 0 ? -s[i] : s[i];
+      if (a > p)
+        p = a;
+    }
+    last_spk_peak_ = p;
+    last_spk_ms_ = millis();
+  }
 #ifdef FDAUDIO_USE_AEC
   // Store the far-end frame as the echo reference, decimated to mic_rate_ so it
   // aligns with the (decimated) mic before AEC.
