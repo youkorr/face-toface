@@ -157,7 +157,11 @@ bool FdAudio::init_codecs_() {
 
   es7210_codec_cfg_t mic_cfg = {};
   mic_cfg.ctrl_if = in_ctrl;
-  mic_cfg.mic_selected = ES7210_SEL_MIC1;  // single mic on channel 1
+  // Which physical mic input(s) of the ES7210 are wired to the board's mic.
+  // Configurable from YAML because it differs per board (often MIC1, but some
+  // route the analog mic to MIC2/3/4). Bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8.
+  mic_cfg.mic_selected = (es7210_mic_select_t) mic_channels_;
+  ESP_LOGI(TAG, "ES7210 mic_selected bitmask=0x%02X", mic_channels_);
   in_codec_if_ = (void *) es7210_codec_new(&mic_cfg);
   if (in_codec_if_ == nullptr) {
     ESP_LOGE(TAG, "ES7210 codec new failed");

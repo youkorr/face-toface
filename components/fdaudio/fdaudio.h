@@ -44,6 +44,7 @@ class FdAudio : public Component {
   void set_output_codec(OutputCodec c) { out_codec_ = c; }
   void set_codec_addrs(uint8_t out_addr, uint8_t in_addr) { out_addr_ = out_addr; in_addr_ = in_addr; }
   void set_mic_gain_db(float g) { mic_gain_db_ = g; }
+  void set_mic_channels(uint8_t m) { mic_channels_ = m; }
   void set_out_volume(int v) { out_volume_ = v; }
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -72,6 +73,7 @@ class FdAudio : public Component {
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};
   float mic_gain_db_{37.5f};
+  uint8_t mic_channels_{0x01};  // ES7210 mic bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8
   int out_volume_{70};
   bool use_mclk_{true};
   bool aec_enabled_{true};

@@ -27,6 +27,7 @@ CONF_OUTPUT_CODEC = "output_codec"
 CONF_OUTPUT_ADDRESS = "output_address"
 CONF_MIC_ADDRESS = "mic_address"
 CONF_MIC_GAIN_DB = "mic_gain_db"
+CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
 CONF_USE_MCLK = "use_mclk"
 CONF_ENABLE_AEC = "enable_aec"
@@ -55,6 +56,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_OUTPUT_ADDRESS, default=0x18): cv.i2c_address,
         cv.Optional(CONF_MIC_ADDRESS, default=0x40): cv.i2c_address,
         cv.Optional(CONF_MIC_GAIN_DB, default=37.5): cv.float_range(min=0.0, max=42.0),
+        # ES7210 mic input bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8 (combine to enable
+        # several, e.g. 3 = MIC1+MIC2). Default MIC1; change if your board wires
+        # the analog mic to another channel (mic reads near-silent otherwise).
+        cv.Optional(CONF_MIC_CHANNELS, default=1): cv.int_range(min=1, max=15),
         cv.Optional(CONF_OUTPUT_VOLUME, default=70): cv.int_range(min=0, max=100),
         cv.Optional(CONF_USE_MCLK, default=True): cv.boolean,
         cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_,
@@ -76,6 +81,7 @@ async def to_code(config):
     cg.add(var.set_output_codec(config[CONF_OUTPUT_CODEC]))
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))
     cg.add(var.set_mic_gain_db(config[CONF_MIC_GAIN_DB]))
+    cg.add(var.set_mic_channels(config[CONF_MIC_CHANNELS]))
     cg.add(var.set_out_volume(config[CONF_OUTPUT_VOLUME]))
     cg.add(var.set_use_mclk(config[CONF_USE_MCLK]))
     cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
