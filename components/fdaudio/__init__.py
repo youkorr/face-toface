@@ -81,7 +81,12 @@ async def to_code(config):
     cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
 
     # Espressif codec driver (drives ES8311/ES8388/ES7210 over I2C+I2S).
-    esp32.add_idf_component(name="espressif/esp_codec_dev", ref="1.3.4")
+    # Use a recent version + force the NEW i2c_master driver. The default builds
+    # esp_codec_dev against the legacy I2C driver, which conflicts with ESPHome's
+    # new i2c_master driver on IDF 5.4+ -> boot abort: "driver_ng is not allowed
+    # to be used with this old driver".
+    esp32.add_idf_component(name="espressif/esp_codec_dev", ref="1.5.4")
+    esp32.add_idf_sdkconfig_option("CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE", False)
 
     if config[CONF_ENABLE_AEC]:
         # esp-sr master depends on esp-dsp 1.8.0 (matches the project override
