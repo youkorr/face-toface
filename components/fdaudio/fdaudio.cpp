@@ -151,7 +151,7 @@ bool FdAudio::init_codecs_() {
 
   es7210_codec_cfg_t mic_cfg = {};
   mic_cfg.ctrl_if = in_ctrl;
-  mic_cfg.mic_selected = ES7120_SEL_MIC1;  // single mic on channel 1 (SDK typo: ES7120)
+  mic_cfg.mic_selected = ES7210_SEL_MIC1;  // single mic on channel 1
   in_codec_if_ = (void *) es7210_codec_new(&mic_cfg);
   if (in_codec_if_ == nullptr) {
     ESP_LOGE(TAG, "ES7210 codec new failed");
