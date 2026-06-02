@@ -35,6 +35,8 @@ void FdAudio::dump_config() {
   ESP_LOGCONFIG(TAG, "  Codec/I2S rate: %u Hz, mic output: %u Hz (decim %u:1)", codec_rate_,
                 mic_rate_, codec_rate_ / mic_rate_);
   ESP_LOGCONFIG(TAG, "  Mic digital gain: x%.2f", mic_digital_gain_);
+  ESP_LOGCONFIG(TAG, "  Noise gate: %s (thresh=%d)", noise_gate_thresh_ > 0 ? "on" : "off",
+                noise_gate_thresh_);
   ESP_LOGCONFIG(TAG, "  Output codec: %s (0x%02X), mic ES7210 (0x%02X)",
                 out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388", out_addr_, in_addr_);
   ESP_LOGCONFIG(TAG, "  AEC: %s", aec_enabled_ ? "enabled" : "off");
@@ -343,6 +345,29 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
 
   if (aec_enabled_)
     run_aec_(out, got / 2);
+
+  // Lightweight noise gate: pass speech (envelope above threshold), attenuate
+  // ambient noise. Instant attack, ~50 ms envelope release; gain opens in ~5 ms
+  // and closes in ~150 ms so there are no clicks and the start of "ok nabu"
+  // isn't clipped. 0 = disabled (default).
+  if (noise_gate_thresh_ > 0) {
+    const float thr = (float) noise_gate_thresh_;
+    for (size_t i = 0; i < got / 2; i++) {
+      float a = out[i] < 0 ? -(float) out[i] : (float) out[i];
+      gate_env_ = a > gate_env_ ? a : gate_env_ * 0.99913f;  // attack / release
+      const float target = gate_env_ > thr ? 1.0f : 0.0f;
+      if (target > gate_gain_) {
+        gate_gain_ += 0.0125f;  // open ~5 ms
+        if (gate_gain_ > 1.0f)
+          gate_gain_ = 1.0f;
+      } else {
+        gate_gain_ -= 0.000417f;  // close ~150 ms (acts as a hold)
+        if (gate_gain_ < 0.0f)
+          gate_gain_ = 0.0f;
+      }
+      out[i] = (int16_t) ((float) out[i] * gate_gain_);
+    }
+  }
 
   return got;
 }

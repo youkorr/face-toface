@@ -47,6 +47,7 @@ class FdAudio : public Component {
   void set_mic_gain_db(float g) { mic_gain_db_ = g; }
   void set_mic_channels(uint8_t m) { mic_channels_ = m; }
   void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
+  void set_noise_gate(int t) { noise_gate_thresh_ = t; }
   void set_out_volume(int v) { out_volume_ = v; }
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -74,6 +75,12 @@ class FdAudio : public Component {
   uint32_t codec_rate_{48000};   // actual I2S + codec clock (matches working board config)
   std::vector<int16_t> mic_scratch_;  // codec-rate read buffer before decimation
   float mic_digital_gain_{1.0f};      // software boost for weak mic (AGC-lite)
+  // Lightweight software noise gate (0 = disabled). No buffers, a few float
+  // ops/sample. gate_env_ tracks the signal envelope; gate_gain_ is the smoothed
+  // applied gain (opens fast, closes slowly to avoid clicks).
+  int noise_gate_thresh_{0};
+  float gate_env_{0.0f};
+  float gate_gain_{1.0f};
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};
