@@ -29,7 +29,7 @@ class FdAudioSpeaker : public Component, public speaker::Speaker {
   static void write_task_(void *param);
 
   FdAudio *parent_{nullptr};
-  std::unique_ptr<RingBuffer> ring_;
+  std::unique_ptr<ring_buffer::RingBuffer> ring_;
   TaskHandle_t task_{nullptr};
   volatile bool want_run_{false};
 };

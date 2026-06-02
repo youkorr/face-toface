@@ -7,7 +7,7 @@ namespace fdaudio {
 static const char *const TAG = "fdaudio.spk";
 
 void FdAudioSpeaker::setup() {
-  this->ring_ = RingBuffer::create(16384);
+  this->ring_ = ring_buffer::RingBuffer::create(16384);
 }
 
 void FdAudioSpeaker::dump_config() { ESP_LOGCONFIG(TAG, "fdaudio speaker"); }

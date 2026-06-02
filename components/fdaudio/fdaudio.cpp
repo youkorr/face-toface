@@ -91,7 +91,7 @@ bool FdAudio::init_codecs_() {
   i2s_data_cfg.port = I2S_NUM_0;
   i2s_data_cfg.rx_handle = rx_chan_;
   i2s_data_cfg.tx_handle = tx_chan_;
-  data_if_ = audio_codec_new_i2s_data(&i2s_data_cfg);
+  data_if_ = (void *) audio_codec_new_i2s_data(&i2s_data_cfg);
 
   gpio_if_ = (void *) audio_codec_new_gpio();
 
@@ -137,7 +137,7 @@ bool FdAudio::init_codecs_() {
 
   es7210_codec_cfg_t mic_cfg = {};
   mic_cfg.ctrl_if = in_ctrl;
-  mic_cfg.mic_selected = ES7210_SEL_MIC1;  // single mic on channel 1
+  mic_cfg.mic_selected = ES7120_SEL_MIC1;  // single mic on channel 1 (SDK typo: ES7120)
   in_codec_if_ = (void *) es7210_codec_new(&mic_cfg);
   if (in_codec_if_ == nullptr) {
     ESP_LOGE(TAG, "ES7210 codec new failed");
