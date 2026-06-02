@@ -1,0 +1,228 @@
+# =============================================================================
+# HABBIT Desk PRO — TEST COMPLET : fdaudio (full-duplex) + voice_assistant
+# barge-in + appel vidéo face2face
+# -----------------------------------------------------------------------------
+# Audio 100% Espressif (notre composant fdaudio : esp_driver_i2s + esp_codec_dev
+# + esp-sr), AUCUNE dépendance tierce. Micro + HP simultanés + AEC.
+#
+# Permet de tester EN UNE FOIS :
+#   1) voice_assistant FULL-DUPLEX (barge-in : couper l'assistant en parlant)
+#   2) appel vidéo + audio face2face entre 2 cartes
+#
+# ⚠️ Config MINIMALE de test (audio + VA + appel). À fusionner avec votre UI.
+#    PREMIER JET fdaudio : déboguer la 1re compilation sur la carte.
+# =============================================================================
+
+substitutions:
+  name: hb-full
+  peer_ip: "192.168.1.10"     # IP de l'AUTRE carte (le waveshare)
+
+esphome:
+  name: ${name}
+  # 2 piles ML (si vous ajoutez face_detection) -> compil lourde.
+  # compile_process_limit: 1   # décommentez si "cc1plus Killed" (OOM)
+
+esp32:
+  variant: esp32p4
+  flash_size: 16MB
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    sdkconfig_options:
+      # esp-sr/AFE peut bloquer la loopTask au démarrage -> task_wdt.
+      CONFIG_ESP_TASK_WDT_EN: "n"
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# ⚠️ Remplacez par les VRAIS pins esp32_hosted de votre carte (sinon pas de WiFi)
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  use_psram: true
+  slot: 1
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/test2_esp_video_esphome
+      ref: claude/nifty-dijkstra-gdUqZ
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: always
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio, face2face]
+    refresh: always
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO31
+    scl: GPIO32
+    frequency: 400kHz
+
+esp_ldo:
+  - { voltage: 2.5V, channel: 3 }
+  - { voltage: 2.5V, channel: 4 }
+
+# --- Caméra OV5647 ---
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: sc202cs
+  resolution: "1280x720"
+  framerate: 30
+  jpeg_quality: 15
+
+# ============================================================================
+# AUDIO FULL-DUPLEX — notre composant fdaudio (Espressif natif)
+# ============================================================================
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO29
+  bclk_pin: GPIO27
+  mclk_pin: GPIO30
+  din_pin: GPIO28
+  dout_pin: GPIO26
+  i2c_port: 0
+  output_codec: es8388
+  output_address: 0x10
+  mic_address: 0x40
+  mic_gain_db: 37.5
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: true            # AEC -> micro nettoyé (rend le barge-in fiable)
+
+microphone:
+  - platform: fdaudio
+    id: esp32_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: esp32_speaker
+    fdaudio_id: audio_engine
+
+media_player:
+  - platform: speaker
+    name: "P4 Media Player"
+    id: speaker_media_player
+    announcement_pipeline:
+      speaker: esp32_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: okay_nabu
+
+# ----------------------------------------------------------------------------
+# VOICE ASSISTANT FULL-DUPLEX (barge-in)
+# ----------------------------------------------------------------------------
+# Le micro reste actif pendant le TTS (l'AEC de fdaudio enlève l'écho du HP),
+# donc vous pouvez dire le mot d'éveil PENDANT que l'assistant parle pour le
+# couper. C'est ce que la communauté ESPHome attend (issue #563).
+voice_assistant:
+  id: va
+  microphone: esp32_microphone
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  continuous: true            # conversation continue (réécoute après réponse)
+  # PAS de micro_wake_word.stop pendant le TTS -> barge-in possible.
+  on_tts_start:
+    - logger.log: "TTS — dites le mot d'éveil pour COUPER (barge-in)"
+  on_end:
+    # n'enchaîne qu'une fois la lecture réellement finie (évite le faux STT)
+    - wait_until:
+        not:
+          media_player.is_announcing:
+    - micro_wake_word.start:
+  on_error:
+    - micro_wake_word.start:
+
+# ============================================================================
+# APPEL VIDÉO + AUDIO — face2face (lit le micro déjà nettoyé par fdaudio)
+# ============================================================================
+face2face:
+  id: f2f
+  peer_ip: ${peer_ip}
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  enable_audio: true
+  enable_aec: false           # AEC déjà faite par fdaudio
+  scale: 3
+  jpeg_quality: 35
+  framerate: 10
+  swap_colors: true
+  ring_timeout: 30s
+  on_streaming:
+    # pendant un appel : couper le VA, libérer la caméra preview
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
+    - lambda: "id(camera_display)->set_enabled(false);"
+  on_idle:
+    - lambda: "id(camera_display)->set_enabled(true);"
+    - micro_wake_word.start:
+
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+button:
+  - platform: template
+    name: "Appeler"
+    on_press: [ face2face.call: f2f ]
+  - platform: template
+    name: "Décrocher"
+    on_press: [ face2face.answer: f2f ]
+  - platform: template
+    name: "Raccrocher"
+    on_press: [ face2face.hangup: f2f ]
+
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    icon: "mdi:ip-network"
+    mode: text
+    optimistic: true
+    restore_value: true
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
