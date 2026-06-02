@@ -74,9 +74,6 @@ class FdAudio : public Component {
   uint32_t codec_rate_{48000};   // actual I2S + codec clock (matches working board config)
   std::vector<int16_t> mic_scratch_;  // codec-rate read buffer before decimation
   float mic_digital_gain_{1.0f};      // software boost for weak mic (AGC-lite)
-  // Duplex activity tracking (to log that speaker + mic run simultaneously).
-  uint32_t last_spk_ms_{0};
-  int32_t last_spk_peak_{0};
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};

@@ -150,6 +150,16 @@ micro_wake_word:
   id: mww
   models:
     - model: okay_nabu
+  on_wake_word_detected:
+    # BARGE-IN (testé OK) : si l'assistant est en train de répondre, on coupe
+    # proprement la réponse, on ATTEND le retour à IDLE, puis on relance une
+    # écoute. Sans le wait_until, voice_assistant.start est ignoré (VA occupé).
+    - voice_assistant.stop:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - delay: 200ms
+    - voice_assistant.start:
 
 # ----------------------------------------------------------------------------
 # VOICE ASSISTANT FULL-DUPLEX (barge-in)
@@ -163,9 +173,9 @@ voice_assistant:
   media_player: speaker_media_player
   micro_wake_word: mww
   continuous: true            # conversation continue (réécoute après réponse)
-  # PAS de micro_wake_word.stop pendant le TTS -> barge-in possible.
   on_tts_start:
-    - logger.log: "TTS — dites le mot d'éveil pour COUPER (barge-in)"
+    # BARGE-IN : ré-écoute PENDANT que l'assistant parle (l'AEC enlève l'écho).
+    - micro_wake_word.start:
   on_end:
     # n'enchaîne qu'une fois la lecture réellement finie (évite le faux STT)
     - wait_until:
