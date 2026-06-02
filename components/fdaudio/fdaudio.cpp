@@ -285,6 +285,21 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
     return 0;
   if (aec_enabled_)
     run_aec_(reinterpret_cast<int16_t *>(dst), (size_t) got / 2);
+
+  // Throttled mic level meter: tells us whether the codec returns real audio
+  // (peak moves when you talk) or constant silence (codec/wiring issue).
+  static uint32_t dbg = 0;
+  if ((dbg++ & 0x1F) == 0) {  // ~ every 32 reads
+    const int16_t *s = reinterpret_cast<const int16_t *>(dst);
+    size_t n = (size_t) got / 2;
+    int32_t peak = 0;
+    for (size_t i = 0; i < n; i++) {
+      int32_t a = s[i] < 0 ? -s[i] : s[i];
+      if (a > peak)
+        peak = a;
+    }
+    ESP_LOGD(TAG, "mic level: peak=%d (%u bytes)", (int) peak, (unsigned) got);
+  }
   return (size_t) got;
 }
 
