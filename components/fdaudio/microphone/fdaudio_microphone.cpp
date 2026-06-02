@@ -12,24 +12,33 @@ void FdAudioMicrophone::setup() {
 
 void FdAudioMicrophone::dump_config() { ESP_LOGCONFIG(TAG, "fdaudio microphone"); }
 
+// start()/stop() are called once per consumer (micro_wake_word, voice_assistant,
+// face2face). They only adjust the listener count; the actual task is started or
+// stopped in loop() so back-to-back stop()+start() during a handoff don't drop
+// the mic.
 void FdAudioMicrophone::start() {
-  if (this->state_ == microphone::STATE_RUNNING || this->want_run_)
-    return;
-  if (parent_ == nullptr || !parent_->engine_start()) {
-    ESP_LOGE(TAG, "engine start failed");
-    return;
-  }
-  this->state_ = microphone::STATE_STARTING;
-  this->want_run_ = true;
-  xTaskCreatePinnedToCore(read_task_, "fdaudio_mic", 4096, this, 5, &this->task_, 1);
+  this->listeners_++;
 }
 
 void FdAudioMicrophone::stop() {
-  if (!this->want_run_)
-    return;
-  this->want_run_ = false;
-  this->state_ = microphone::STATE_STOPPING;
-  // task exits on its own; engine_stop happens there.
+  if (this->listeners_ > 0)
+    this->listeners_--;
+}
+
+void FdAudioMicrophone::loop() {
+  const bool want = this->listeners_ > 0;
+  if (want && this->state_ == microphone::STATE_STOPPED && this->task_ == nullptr) {
+    if (parent_ == nullptr || !parent_->engine_start()) {
+      ESP_LOGE(TAG, "engine start failed");
+      return;
+    }
+    this->want_run_ = true;
+    this->state_ = microphone::STATE_STARTING;
+    xTaskCreatePinnedToCore(read_task_, "fdaudio_mic", 4096, this, 5, &this->task_, 1);
+  } else if (!want && this->state_ == microphone::STATE_RUNNING) {
+    this->want_run_ = false;  // task exits on its own; engine_stop happens there
+    this->state_ = microphone::STATE_STOPPING;
+  }
 }
 
 void FdAudioMicrophone::read_task_(void *param) {
