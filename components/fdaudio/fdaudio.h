@@ -53,6 +53,10 @@ class FdAudio : public Component {
   // 0 = off. Can be changed at runtime (e.g. face2face enables it per-call so
   // it doesn't break voice_assistant barge-in).
   void set_echo_suppression(int percent) { echo_suppress_ = percent; }
+  // Automatic gain control: auto-boost a weak mic toward this target peak level
+  // (0 = off). Replaces guessing mic_digital_gain by hand. ~8000-12000 is a good
+  // call level. This is what the board's working AFE did ("relève la voix faible").
+  void set_mic_agc(int target) { mic_agc_target_ = target; }
   void set_out_volume(int v) { out_volume_ = v; }
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -92,6 +96,10 @@ class FdAudio : public Component {
   float duck_gain_{1.0f};
   uint32_t last_spk_ms_{0};
   int32_t last_spk_peak_{0};
+  // Automatic gain control (0 = off, else target peak level).
+  int mic_agc_target_{0};
+  float agc_env_{0.0f};
+  float agc_gain_{1.0f};
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};

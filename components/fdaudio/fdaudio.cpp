@@ -370,6 +370,38 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
     }
   }
 
+  // Automatic gain control: bring a weak mic up to a target level (per frame,
+  // smoothed across frames). Applied after the noise gate so silence (already
+  // gated to ~0) isn't blasted, and before ducking so echo suppression still
+  // wins when the far end plays. This is what fixes "call audio too faint".
+  if (mic_agc_target_ > 0) {
+    int32_t pk = 0;
+    for (size_t i = 0; i < got / 2; i++) {
+      int32_t a = out[i] < 0 ? -out[i] : out[i];
+      if (a > pk)
+        pk = a;
+    }
+    const float fpk = (float) pk;
+    if (fpk > agc_env_)
+      agc_env_ += (fpk - agc_env_) * 0.6f;  // attack
+    else
+      agc_env_ *= 0.95f;                     // release (~0.6 s)
+    const float env = agc_env_ < 1.0f ? 1.0f : agc_env_;
+    float desired = (float) mic_agc_target_ / env;
+    const float kMaxGain = 12.0f;
+    if (desired > kMaxGain)
+      desired = kMaxGain;
+    if (desired < 1.0f)
+      desired = 1.0f;
+    agc_gain_ += (desired - agc_gain_) * 0.2f;  // smooth gain across frames
+    for (size_t i = 0; i < got / 2; i++) {
+      int32_t v = (int32_t) ((float) out[i] * agc_gain_);
+      if (v > 32767) v = 32767;
+      if (v < -32768) v = -32768;
+      out[i] = (int16_t) v;
+    }
+  }
+
   // Far-end ducking (echo suppression): when the speaker recently played the
   // far end at a meaningful level, attenuate the mic so we don't send its echo
   // back (the robust intercom fix when AEC alone can't cancel it). Smoothed to

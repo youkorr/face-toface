@@ -35,6 +35,7 @@ CONF_CODEC_SAMPLE_RATE = "codec_sample_rate"
 CONF_MIC_DIGITAL_GAIN = "mic_digital_gain"
 CONF_NOISE_GATE = "noise_gate"
 CONF_ECHO_SUPPRESSION = "echo_suppression"
+CONF_MIC_AGC = "mic_agc"
 
 fdaudio_ns = cg.esphome_ns.namespace("fdaudio")
 FdAudio = fdaudio_ns.class_("FdAudio", cg.Component)
@@ -84,6 +85,10 @@ CONFIG_SCHEMA = cv.Schema(
         # 0 for voice_assistant (it would break barge-in); face2face can enable
         # it per-call at runtime via id(audio_engine).set_echo_suppression(85).
         cv.Optional(CONF_ECHO_SUPPRESSION, default=0): cv.int_range(min=0, max=100),
+        # Automatic gain control: auto-boost a weak mic to this target peak
+        # (0 = off). ~10000 gives a good call level. Replaces hand-tuned
+        # mic_digital_gain. This is what fixes faint face2face audio.
+        cv.Optional(CONF_MIC_AGC, default=0): cv.int_range(min=0, max=30000),
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -102,6 +107,7 @@ async def to_code(config):
     cg.add(var.set_mic_digital_gain(config[CONF_MIC_DIGITAL_GAIN]))
     cg.add(var.set_noise_gate(config[CONF_NOISE_GATE]))
     cg.add(var.set_echo_suppression(config[CONF_ECHO_SUPPRESSION]))
+    cg.add(var.set_mic_agc(config[CONF_MIC_AGC]))
     cg.add(var.set_i2c_port(config[CONF_I2C_PORT]))
     cg.add(var.set_output_codec(config[CONF_OUTPUT_CODEC]))
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))
