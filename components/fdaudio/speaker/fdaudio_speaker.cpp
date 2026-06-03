@@ -1,6 +1,8 @@
 #include "fdaudio_speaker.h"
 #include "esphome/core/log.h"
 
+#include <cstring>
+
 namespace esphome {
 namespace fdaudio {
 
@@ -58,6 +60,18 @@ void FdAudioSpeaker::write_task_(void *param) {
     if (got == 0) {
       vTaskDelay(1);
       continue;
+    }
+    // Apply the media_player / speaker software volume + mute. The base
+    // speaker::set_volume() only stores volume_ (it forwards to an audio_dac we
+    // don't have), so without this the media_player volume slider does nothing.
+    const float vol = self->get_mute_state() ? 0.0f : self->get_volume();
+    if (vol <= 0.001f) {
+      std::memset(buf.data(), 0, got);
+    } else if (vol < 0.999f) {
+      int16_t *s = reinterpret_cast<int16_t *>(buf.data());
+      const size_t n = got / sizeof(int16_t);
+      for (size_t i = 0; i < n; i++)
+        s[i] = (int16_t) ((float) s[i] * vol);
     }
     const uint32_t dst = self->parent_->codec_sample_rate();
     const uint32_t src = self->src_rate_;
