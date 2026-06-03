@@ -1,5 +1,6 @@
 #include "fdaudio.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"  // millis()
 
 #include <cstring>
 
@@ -369,12 +370,45 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
     }
   }
 
+  // Far-end ducking (echo suppression): when the speaker recently played the
+  // far end at a meaningful level, attenuate the mic so we don't send its echo
+  // back (the robust intercom fix when AEC alone can't cancel it). Smoothed to
+  // avoid pumping: ducks fast (~3 ms), releases slower (~17 ms).
+  if (echo_suppress_ > 0) {
+    const bool far_active = (millis() - last_spk_ms_ < 120) && (last_spk_peak_ > 800);
+    const float floor = 1.0f - (float) echo_suppress_ / 100.0f;
+    for (size_t i = 0; i < got / 2; i++) {
+      if (far_active)
+        duck_gain_ -= 0.02f;
+      else
+        duck_gain_ += 0.003f;
+      if (duck_gain_ < floor)
+        duck_gain_ = floor;
+      if (duck_gain_ > 1.0f)
+        duck_gain_ = 1.0f;
+      out[i] = (int16_t) ((float) out[i] * duck_gain_);
+    }
+  }
+
   return got;
 }
 
 void FdAudio::write_speaker(const uint8_t *src, size_t len) {
   if (out_dev_ == nullptr || len == 0)
     return;
+  // Track speaker activity + level for the far-end ducking in read_mic.
+  {
+    const int16_t *s = reinterpret_cast<const int16_t *>(src);
+    size_t n = len / 2;
+    int32_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+      int32_t a = s[i] < 0 ? -s[i] : s[i];
+      if (a > p)
+        p = a;
+    }
+    last_spk_peak_ = p;
+    last_spk_ms_ = millis();
+  }
 #ifdef FDAUDIO_USE_AEC
   // Store the far-end frame as the echo reference, decimated to mic_rate_ so it
   // aligns with the (decimated) mic before AEC.

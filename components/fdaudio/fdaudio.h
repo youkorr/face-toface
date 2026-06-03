@@ -48,6 +48,11 @@ class FdAudio : public Component {
   void set_mic_channels(uint8_t m) { mic_channels_ = m; }
   void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
   void set_noise_gate(int t) { noise_gate_thresh_ = t; }
+  // Far-end ducking (echo suppression for calls): when the speaker is playing
+  // the far end, attenuate the mic by this % so its echo isn't sent back.
+  // 0 = off. Can be changed at runtime (e.g. face2face enables it per-call so
+  // it doesn't break voice_assistant barge-in).
+  void set_echo_suppression(int percent) { echo_suppress_ = percent; }
   void set_out_volume(int v) { out_volume_ = v; }
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
@@ -82,6 +87,11 @@ class FdAudio : public Component {
   int noise_gate_thresh_{0};
   float gate_env_{0.0f};
   float gate_gain_{1.0f};
+  // Far-end ducking / echo suppression (0 = off, else % attenuation).
+  int echo_suppress_{0};
+  float duck_gain_{1.0f};
+  uint32_t last_spk_ms_{0};
+  int32_t last_spk_peak_{0};
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
   uint8_t out_addr_{0x18}, in_addr_{0x40};
