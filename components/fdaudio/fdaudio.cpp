@@ -298,7 +298,7 @@ bool FdAudio::init_afe_() {
   cfg->wakenet_init = false;  // no wake word in the AFE (mWW stays separate)
   cfg->pcm_config.sample_rate = (int) mic_rate_;
 
-  esp_afe_sr_iface_t *afe = esp_afe_handle_from_config(cfg);
+  const esp_afe_sr_iface_t *afe = esp_afe_handle_from_config(cfg);
   if (afe == nullptr) {
     ESP_LOGW(TAG, "esp_afe_handle_from_config failed");
     afe_config_free(cfg);
@@ -334,7 +334,7 @@ bool FdAudio::init_afe_() {
 
 size_t FdAudio::read_mic_afe_(uint8_t *dst, size_t len) {
 #ifdef FDAUDIO_USE_AEC
-  auto *afe = static_cast<esp_afe_sr_iface_t *>(afe_handle_);
+  auto *afe = static_cast<const esp_afe_sr_iface_t *>(afe_handle_);
   auto *data = static_cast<esp_afe_sr_data_t *>(afe_data_);
 
   // Read exactly one AFE chunk of mic from the codec (decimate codec_rate_ ->
