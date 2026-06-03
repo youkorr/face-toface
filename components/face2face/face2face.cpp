@@ -325,6 +325,13 @@ bool Face2Face::open_sockets_() {
     int txbuf = 65536;  // bigger TX buffer: a JPEG frame is dozens of fragments
     ::setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &txbuf, sizeof(txbuf));
 
+    // WiFi QoS (WMM): mark audio as Voice (AC_VO) and video as Video (AC_VI) so
+    // the radio sends audio before the heavy video stream. On a shared
+    // WiFi-over-SDIO link the bursty MJPEG otherwise starves the small audio
+    // stream -> choppy/jittery sound. IP_TOS upper bits map to the 802.11e AC.
+    int tos = (i == 0) ? 0x80 : 0xC0;  // video=CS4/AC_VI, audio=CS6/AC_VO (higher)
+    ::setsockopt(sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
