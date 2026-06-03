@@ -60,6 +60,9 @@ class FdAudio : public Component {
   void set_out_volume(int v);  // 0..100, applied live to the codec if open
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
+  // Use the full esp-sr AFE (AEC+NS+AGC with an aligned reference) instead of
+  // the simple aec_create path. This is the proper echo fix.
+  void set_use_afe(bool e) { use_afe_ = e; }
 
   // ---- Engine control (ref-counted: started while any consumer is active) ----
   bool engine_start();
@@ -123,7 +126,7 @@ class FdAudio : public Component {
   void *out_codec_if_{nullptr};
   void *in_codec_if_{nullptr};
 
-  // AEC (esp-sr)
+  // AEC (esp-sr simple aec_create path)
   void *aec_handle_{nullptr};
   int aec_chunk_{0};
   int16_t *aec_in_{nullptr};
@@ -133,6 +136,19 @@ class FdAudio : public Component {
   size_t ref_head_{0};
   size_t ref_count_{0};
   bool aec_ready_{false};
+
+  // Full AFE (esp-sr) path: AEC + NS + AGC with a time-aligned reference.
+  bool use_afe_{false};
+  bool afe_active_{false};
+  void *afe_handle_{nullptr};   // esp_afe_sr_iface_t*
+  void *afe_data_{nullptr};     // esp_afe_sr_data_t*
+  int afe_chunk_{0};            // feed samples per channel
+  int afe_nch_{0};              // feed channels (3 for "MNR")
+  std::vector<int16_t> afe_feed_;    // interleaved [M,N,R] feed buffer
+  std::vector<int16_t> afe_micbuf_;  // decimated mono mic chunk
+
+  bool init_afe_();
+  size_t read_mic_afe_(uint8_t *dst, size_t len);
 
   bool running_{false};
   int consumers_{0};

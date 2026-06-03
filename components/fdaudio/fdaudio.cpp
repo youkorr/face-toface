@@ -16,6 +16,10 @@
 #ifdef FDAUDIO_USE_AEC
 #include "esp_aec.h"
 #include "esp_heap_caps.h"
+// Full AFE (AEC + NS + AGC with an aligned reference).
+#include "esp_afe_config.h"
+#include "esp_afe_sr_iface.h"
+#include "esp_afe_sr_models.h"
 #endif
 
 namespace esphome {
@@ -273,6 +277,120 @@ void FdAudio::run_aec_(int16_t *mic, size_t samples) {
 }
 
 // ===========================================================================
+// Full AFE (esp-sr): AEC + NS + AGC. Input format "MNR" = [Mic, Null, Reference]
+// at mic_rate_. The reference is the far-end (speaker) frame, time-aligned by
+// the AFE internally -- this is what makes the echo actually cancel.
+// ===========================================================================
+bool FdAudio::init_afe_() {
+#ifdef FDAUDIO_USE_AEC
+  if (afe_active_)
+    return true;
+  afe_config_t *cfg = afe_config_init("MNR", nullptr, AFE_TYPE_VC, AFE_MODE_LOW_COST);
+  if (cfg == nullptr) {
+    ESP_LOGW(TAG, "afe_config_init failed");
+    return false;
+  }
+  cfg->aec_init = true;
+  cfg->ns_init = true;
+  cfg->agc_init = true;
+  cfg->se_init = false;       // no BSS/speech-enhancement (single mic)
+  cfg->vad_init = false;
+  cfg->wakenet_init = false;  // no wake word in the AFE (mWW stays separate)
+  cfg->pcm_config.sample_rate = (int) mic_rate_;
+
+  esp_afe_sr_iface_t *afe = esp_afe_handle_from_config(cfg);
+  if (afe == nullptr) {
+    ESP_LOGW(TAG, "esp_afe_handle_from_config failed");
+    afe_config_free(cfg);
+    return false;
+  }
+  esp_afe_sr_data_t *data = afe->create_from_config(cfg);
+  afe_config_free(cfg);
+  if (data == nullptr) {
+    ESP_LOGW(TAG, "AFE create_from_config failed");
+    return false;
+  }
+  afe_handle_ = (void *) afe;
+  afe_data_ = (void *) data;
+  afe_chunk_ = afe->get_feed_chunksize(data);
+  afe_nch_ = afe->get_feed_channel_num(data);
+  if (afe_chunk_ <= 0 || afe_nch_ <= 0) {
+    ESP_LOGW(TAG, "AFE bad chunk/nch (%d/%d)", afe_chunk_, afe_nch_);
+    return false;
+  }
+  afe_feed_.assign((size_t) afe_chunk_ * afe_nch_, 0);
+  afe_micbuf_.assign((size_t) afe_chunk_, 0);
+  // Reference history (far-end), sized generously for the AFE's delay search.
+  ref_ring_.assign((size_t) afe_chunk_ * 64, 0);
+  ref_head_ = 0;
+  ref_count_ = 0;
+  afe_active_ = true;
+  ESP_LOGI(TAG, "AFE ready (AEC+NS+AGC, chunk=%d, channels=%d, fmt=MNR)", afe_chunk_, afe_nch_);
+  return true;
+#else
+  return false;
+#endif
+}
+
+size_t FdAudio::read_mic_afe_(uint8_t *dst, size_t len) {
+#ifdef FDAUDIO_USE_AEC
+  auto *afe = static_cast<esp_afe_sr_iface_t *>(afe_handle_);
+  auto *data = static_cast<esp_afe_sr_data_t *>(afe_data_);
+
+  // Read exactly one AFE chunk of mic from the codec (decimate codec_rate_ ->
+  // mic_rate_, apply the manual digital gain), then interleave [M,N,R].
+  uint32_t decim = codec_rate_ / mic_rate_;
+  if (decim < 1)
+    decim = 1;
+  size_t in_samples = (size_t) afe_chunk_ * decim;
+  if (mic_scratch_.size() < in_samples)
+    mic_scratch_.resize(in_samples);
+  if (esp_codec_dev_read((esp_codec_dev_handle_t) in_dev_, mic_scratch_.data(),
+                         (int) (in_samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK)
+    return 0;
+
+  for (int i = 0; i < afe_chunk_; i++) {
+    int32_t acc = 0;
+    for (uint32_t k = 0; k < decim; k++)
+      acc += mic_scratch_[(size_t) i * decim + k];
+    int32_t s = (int32_t) ((acc / (int32_t) decim) * mic_digital_gain_);
+    if (s > 32767) s = 32767;
+    if (s < -32768) s = -32768;
+    afe_micbuf_[i] = (int16_t) s;
+  }
+
+  // Build the interleaved feed buffer: channel 0 = mic, last channel = ref,
+  // middle channels (the "N" in MNR) = 0. Pull the far-end reference per sample.
+  for (int i = 0; i < afe_chunk_; i++) {
+    int16_t ref = 0;
+    if (ref_count_ > 0) {
+      ref = ref_ring_[ref_head_];
+      ref_head_ = (ref_head_ + 1) % ref_ring_.size();
+      ref_count_--;
+    }
+    int base = i * afe_nch_;
+    afe_feed_[base + 0] = afe_micbuf_[i];
+    for (int c = 1; c < afe_nch_ - 1; c++)
+      afe_feed_[base + c] = 0;
+    afe_feed_[base + (afe_nch_ - 1)] = ref;
+  }
+
+  afe->feed(data, afe_feed_.data());
+  afe_fetch_result_t *res = afe->fetch(data);
+  if (res == nullptr || res->data == nullptr || res->data_size <= 0)
+    return 0;
+  size_t n = (size_t) res->data_size;
+  if (n > len)
+    n = len;
+  std::memcpy(dst, res->data, n);
+  return n;
+#else
+  (void) dst; (void) len;
+  return 0;
+#endif
+}
+
+// ===========================================================================
 // Engine lifecycle (ref-counted)
 // ===========================================================================
 bool FdAudio::engine_start() {
@@ -283,8 +401,13 @@ bool FdAudio::engine_start() {
     ESP_LOGE(TAG, "engine_start failed");
     return false;
   }
-  if (aec_enabled_)
+  if (use_afe_) {
+    // Full AFE (AEC+NS+AGC); fall back to the simple AEC if it fails to init.
+    if (!init_afe_() && aec_enabled_)
+      init_aec_();
+  } else if (aec_enabled_) {
     init_aec_();
+  }
   running_ = true;
   ESP_LOGI(TAG, "Audio engine started (consumers=%d)", consumers_);
   return true;
@@ -306,6 +429,11 @@ void FdAudio::engine_stop() {
 size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
   if (in_dev_ == nullptr)
     return 0;
+
+  // Full AFE path (AEC+NS+AGC): returns the cleaned mic directly. Skip the
+  // simple AEC / noise gate / AGC / ducking below (the AFE already does it).
+  if (afe_active_)
+    return read_mic_afe_(dst, len);
 
   // The codec runs at codec_rate_ (e.g. 48 kHz) but ESPHome wants mic_rate_
   // (e.g. 16 kHz). Read decim x more samples and average each group down.
@@ -454,8 +582,8 @@ void FdAudio::write_speaker(const uint8_t *src, size_t len) {
   }
 #ifdef FDAUDIO_USE_AEC
   // Store the far-end frame as the echo reference, decimated to mic_rate_ so it
-  // aligns with the (decimated) mic before AEC.
-  if (aec_ready_) {
+  // aligns with the (decimated) mic before AEC/AFE. Used by both paths.
+  if (aec_ready_ || afe_active_) {
     const int16_t *s = reinterpret_cast<const int16_t *>(src);
     size_t n = len / 2;
     uint32_t decim = codec_rate_ / mic_rate_;
