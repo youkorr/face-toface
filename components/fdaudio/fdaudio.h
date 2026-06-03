@@ -56,6 +56,7 @@ class FdAudio : public Component {
   bool engine_start();
   void engine_stop();
   bool engine_running() const { return running_; }
+  uint32_t codec_sample_rate() const { return codec_rate_; }  // actual I2S/codec clock
 
   // ---- Mic read (16-bit mono at mic_rate_) / speaker write (at codec_rate_) ----
   // Returns bytes actually read/written. Mic data is AEC-cleaned if enabled.

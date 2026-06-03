@@ -8,6 +8,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <memory>
+#include <vector>
+#include <cstdint>
 
 namespace esphome {
 namespace fdaudio {
@@ -32,6 +34,13 @@ class FdAudioSpeaker : public Component, public speaker::Speaker {
   std::unique_ptr<ring_buffer::RingBuffer> ring_;
   TaskHandle_t task_{nullptr};
   volatile bool want_run_{false};
+  // Source sample rate of the data being played (captured in play() from the
+  // stream info). The engine clocks the codec at 48 kHz, so 16 kHz callers
+  // (face2face, ringtone) are upsampled in write_task_; media_player already
+  // sends 48 kHz -> passthrough.
+  volatile uint32_t src_rate_{0};
+  int16_t resamp_last_{0};
+  std::vector<int16_t> resamp_buf_;
 };
 
 }  // namespace fdaudio
