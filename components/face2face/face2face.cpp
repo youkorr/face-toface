@@ -202,6 +202,10 @@ void Face2Face::start_streaming_() {
     return;
   }
   set_state_(STATE_STREAMING);
+  // Power the speaker amplifier (PA) for the call, like the media_player does
+  // for TTS. Without this the call audio is stuck at codec line level (faint).
+  if (amplifier_ != nullptr)
+    amplifier_->turn_on();
   // Fire on_streaming first so YAML can stop wake-word / voice_assistant and
   // release the microphone *before* we start capturing it ourselves.
   if (on_streaming_ != nullptr)
@@ -243,6 +247,9 @@ void Face2Face::go_idle_() {
   }
   // Free the JPEG codec, framebuffer and AEC buffers (~several MB of PSRAM).
   release_media_();
+  // Turn the speaker amplifier back off now the call is over.
+  if (amplifier_ != nullptr)
+    amplifier_->turn_off();
   if (was_active && on_idle_ != nullptr)
     on_idle_->trigger();
 }

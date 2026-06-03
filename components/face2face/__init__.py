@@ -16,7 +16,7 @@ call between two ESP32-P4 boards. No external intercom dependency:
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import esp32, microphone, speaker
+from esphome.components import esp32, microphone, speaker, switch
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@youkorr"]
@@ -28,6 +28,7 @@ CONF_AUDIO_PORT = "audio_port"
 CONF_CAMERA_ID = "camera_id"
 CONF_MICROPHONE_ID = "microphone_id"
 CONF_SPEAKER_ID = "speaker_id"
+CONF_AMPLIFIER = "amplifier"
 CONF_WIDTH = "width"
 CONF_HEIGHT = "height"
 CONF_FRAMERATE = "framerate"
@@ -84,6 +85,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
         cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
+        # Optional speaker-amplifier (PA) enable switch. face2face turns it on for
+        # the duration of a call and off afterwards -- like the media_player does
+        # for TTS via on_announcement -- so call audio isn't left at line level.
+        cv.Optional(CONF_AMPLIFIER): cv.use_id(switch.Switch),
         cv.Optional(CONF_VIDEO_PORT, default=9000): cv.port,
         cv.Optional(CONF_AUDIO_PORT, default=9001): cv.port,
         cv.Optional(CONF_WIDTH, default=640): cv.int_range(min=160, max=1920),
@@ -153,6 +158,9 @@ async def to_code(config):
     if CONF_SPEAKER_ID in config:
         spk = await cg.get_variable(config[CONF_SPEAKER_ID])
         cg.add(var.set_speaker(spk))
+    if CONF_AMPLIFIER in config:
+        amp = await cg.get_variable(config[CONF_AMPLIFIER])
+        cg.add(var.set_amplifier(amp))
 
     for conf in config.get(CONF_ON_RINGING, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])

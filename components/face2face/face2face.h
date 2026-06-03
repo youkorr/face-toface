@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/automation.h"
+#include "esphome/components/switch/switch.h"
 
 #include <cstdint>
 #include <vector>
@@ -124,6 +125,7 @@ class Face2Face : public Component {
   void set_camera(esp_cam_sensor::MipiDSICamComponent *cam) { camera_ = cam; }
   void set_microphone(microphone::Microphone *mic) { mic_ = mic; }
   void set_speaker(speaker::Speaker *spk) { spk_ = spk; }
+  void set_amplifier(switch_::Switch *amp) { amplifier_ = amp; }
 
   // ---- Call control (the native signaling — no external intercom) ----
   void call();      // dial the configured peer
@@ -229,6 +231,7 @@ class Face2Face : public Component {
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
   microphone::Microphone *mic_{nullptr};
   speaker::Speaker *spk_{nullptr};
+  switch_::Switch *amplifier_{nullptr};  // PA enable, on during a call
 
   // triggers
   Trigger<> *on_ringing_{nullptr};
