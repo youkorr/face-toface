@@ -43,6 +43,17 @@ void FdAudio::dump_config() {
   ESP_LOGCONFIG(TAG, "  AEC: %s", aec_enabled_ ? "enabled" : "off");
 }
 
+void FdAudio::set_out_volume(int v) {
+  if (v < 0)
+    v = 0;
+  if (v > 100)
+    v = 100;
+  out_volume_ = v;
+  // Apply immediately if the output codec is already open (live volume from HA).
+  if (out_dev_ != nullptr)
+    esp_codec_dev_set_out_vol((esp_codec_dev_handle_t) out_dev_, out_volume_);
+}
+
 // ===========================================================================
 // I2S full-duplex: one port, TX + RX handles (shared clock)
 // ===========================================================================

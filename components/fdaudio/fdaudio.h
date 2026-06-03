@@ -57,7 +57,7 @@ class FdAudio : public Component {
   // (0 = off). Replaces guessing mic_digital_gain by hand. ~8000-12000 is a good
   // call level. This is what the board's working AFE did ("relève la voix faible").
   void set_mic_agc(int target) { mic_agc_target_ = target; }
-  void set_out_volume(int v) { out_volume_ = v; }
+  void set_out_volume(int v);  // 0..100, applied live to the codec if open
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
 
