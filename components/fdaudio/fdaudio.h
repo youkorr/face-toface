@@ -149,6 +149,11 @@ class FdAudio : public Component {
 
   bool init_afe_();
   size_t read_mic_afe_(uint8_t *dst, size_t len);
+  // The AFE needs feed() and fetch() on separate tasks: this task continuously
+  // reads the codec mic and feeds the AFE; read_mic_afe_ only fetches.
+  static void afe_feed_task_(void *param);
+  void *afe_feed_handle_{nullptr};  // TaskHandle_t (kept as void* in header)
+  volatile bool afe_feed_run_{false};
 
   bool running_{false};
   int consumers_{0};

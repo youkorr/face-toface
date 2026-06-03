@@ -4,6 +4,9 @@
 
 #include <cstring>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 // ESP-IDF new I2C master driver (to reuse ESPHome's bus by port).
 #include "driver/i2c_master.h"
 
@@ -325,6 +328,12 @@ bool FdAudio::init_afe_() {
   ref_head_ = 0;
   ref_count_ = 0;
   afe_active_ = true;
+  // The AFE needs feed() and fetch() on separate tasks (it has an internal
+  // processing thread). Start the dedicated feed task; read_mic_afe_ fetches.
+  afe_feed_run_ = true;
+  TaskHandle_t t = nullptr;
+  xTaskCreatePinnedToCore(afe_feed_task_, "fdaudio_afe_feed", 4096, this, 5, &t, 1);
+  afe_feed_handle_ = (void *) t;
   ESP_LOGI(TAG, "AFE ready (AEC+NS+AGC, chunk=%d, channels=%d, fmt=MNR)", afe_chunk_, afe_nch_);
   return true;
 #else
@@ -332,50 +341,62 @@ bool FdAudio::init_afe_() {
 #endif
 }
 
+#ifdef FDAUDIO_USE_AEC
+// Continuously read the codec mic, decimate to mic_rate_, interleave [M,N,R]
+// (ref = far-end from write_speaker), and feed the AFE. Runs in its own task so
+// the AFE's internal processing always has input (fixes "Ringbuffer is empty").
+void FdAudio::afe_feed_task_(void *param) {
+  auto *self = static_cast<FdAudio *>(param);
+  auto *afe = static_cast<const esp_afe_sr_iface_t *>(self->afe_handle_);
+  auto *data = static_cast<esp_afe_sr_data_t *>(self->afe_data_);
+  uint32_t decim = self->codec_rate_ / self->mic_rate_;
+  if (decim < 1)
+    decim = 1;
+  const int chunk = self->afe_chunk_;
+  const int nch = self->afe_nch_;
+  std::vector<int16_t> scratch((size_t) chunk * decim);
+
+  while (self->afe_feed_run_) {
+    if (self->in_dev_ == nullptr) {
+      vTaskDelay(1);
+      continue;
+    }
+    if (esp_codec_dev_read((esp_codec_dev_handle_t) self->in_dev_, scratch.data(),
+                           (int) (scratch.size() * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+      vTaskDelay(1);
+      continue;
+    }
+    for (int i = 0; i < chunk; i++) {
+      int32_t acc = 0;
+      for (uint32_t k = 0; k < decim; k++)
+        acc += scratch[(size_t) i * decim + k];
+      int32_t s = (int32_t) ((acc / (int32_t) decim) * self->mic_digital_gain_);
+      if (s > 32767) s = 32767;
+      if (s < -32768) s = -32768;
+      int16_t ref = 0;
+      if (self->ref_count_ > 0) {
+        ref = self->ref_ring_[self->ref_head_];
+        self->ref_head_ = (self->ref_head_ + 1) % self->ref_ring_.size();
+        self->ref_count_--;
+      }
+      int base = i * nch;
+      self->afe_feed_[base + 0] = (int16_t) s;            // M (mic)
+      for (int c = 1; c < nch - 1; c++)
+        self->afe_feed_[base + c] = 0;                    // N (null)
+      self->afe_feed_[base + (nch - 1)] = ref;            // R (reference)
+    }
+    afe->feed(data, self->afe_feed_.data());
+  }
+  self->afe_feed_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+#endif
+
 size_t FdAudio::read_mic_afe_(uint8_t *dst, size_t len) {
 #ifdef FDAUDIO_USE_AEC
   auto *afe = static_cast<const esp_afe_sr_iface_t *>(afe_handle_);
   auto *data = static_cast<esp_afe_sr_data_t *>(afe_data_);
-
-  // Read exactly one AFE chunk of mic from the codec (decimate codec_rate_ ->
-  // mic_rate_, apply the manual digital gain), then interleave [M,N,R].
-  uint32_t decim = codec_rate_ / mic_rate_;
-  if (decim < 1)
-    decim = 1;
-  size_t in_samples = (size_t) afe_chunk_ * decim;
-  if (mic_scratch_.size() < in_samples)
-    mic_scratch_.resize(in_samples);
-  if (esp_codec_dev_read((esp_codec_dev_handle_t) in_dev_, mic_scratch_.data(),
-                         (int) (in_samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK)
-    return 0;
-
-  for (int i = 0; i < afe_chunk_; i++) {
-    int32_t acc = 0;
-    for (uint32_t k = 0; k < decim; k++)
-      acc += mic_scratch_[(size_t) i * decim + k];
-    int32_t s = (int32_t) ((acc / (int32_t) decim) * mic_digital_gain_);
-    if (s > 32767) s = 32767;
-    if (s < -32768) s = -32768;
-    afe_micbuf_[i] = (int16_t) s;
-  }
-
-  // Build the interleaved feed buffer: channel 0 = mic, last channel = ref,
-  // middle channels (the "N" in MNR) = 0. Pull the far-end reference per sample.
-  for (int i = 0; i < afe_chunk_; i++) {
-    int16_t ref = 0;
-    if (ref_count_ > 0) {
-      ref = ref_ring_[ref_head_];
-      ref_head_ = (ref_head_ + 1) % ref_ring_.size();
-      ref_count_--;
-    }
-    int base = i * afe_nch_;
-    afe_feed_[base + 0] = afe_micbuf_[i];
-    for (int c = 1; c < afe_nch_ - 1; c++)
-      afe_feed_[base + c] = 0;
-    afe_feed_[base + (afe_nch_ - 1)] = ref;
-  }
-
-  afe->feed(data, afe_feed_.data());
+  // The feed task supplies the AFE; here we only pull the cleaned mono output.
   afe_fetch_result_t *res = afe->fetch(data);
   if (res == nullptr || res->data == nullptr || res->data_size <= 0)
     return 0;
