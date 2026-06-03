@@ -148,6 +148,24 @@ class Face2Face : public Component {
   uint32_t peer_last_seen_ms() const { return last_peer_rx_ms_; }
   void set_presence_timeout(uint32_t ms) { presence_timeout_ms_ = ms; }
 
+  // ---- Audio diagnostics (for an LVGL debug page / sensors) ----
+  // mic level = what WE send (your voice). spk level = what we PLAY (peer audio).
+  // tx/rx = audio frames sent/received. If you hear yourself and rx is moving,
+  // the peer is echoing you back (network round-trip); if rx is 0, it's local.
+  int get_mic_level() const { return (int) dbg_mic_peak_; }
+  int get_spk_level() const { return (int) dbg_spk_peak_; }
+  uint32_t get_audio_tx() const { return dbg_tx_audio_; }
+  uint32_t get_audio_rx() const { return dbg_rx_audio_; }
+  const char *state_str() const {
+    switch (state_) {
+      case STATE_IDLE: return "IDLE";
+      case STATE_OUTGOING: return "OUTGOING";
+      case STATE_RINGING: return "RINGING";
+      case STATE_STREAMING: return "STREAMING";
+      default: return "?";
+    }
+  }
+
   // ---- Remote video access (pushed to LVGL by a YAML lambda) ----
   const uint8_t *remote_rgb565() const { return remote_fb_.empty() ? nullptr : remote_fb_.data(); }
   uint16_t remote_width() const { return remote_w_ ? remote_w_ : width_; }
@@ -232,6 +250,12 @@ class Face2Face : public Component {
   microphone::Microphone *mic_{nullptr};
   speaker::Speaker *spk_{nullptr};
   switch_::Switch *amplifier_{nullptr};  // PA enable, on during a call
+
+  // Audio diagnostics (mic = sent, spk = received/played; tx/rx frame counters).
+  volatile int32_t dbg_mic_peak_{0};
+  volatile int32_t dbg_spk_peak_{0};
+  volatile uint32_t dbg_tx_audio_{0};
+  volatile uint32_t dbg_rx_audio_{0};
 
   // triggers
   Trigger<> *on_ringing_{nullptr};

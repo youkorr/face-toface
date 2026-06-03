@@ -862,6 +862,19 @@ void Face2Face::ref_pop_(int16_t *d, size_t n) {
 void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
   if (state_ != STATE_STREAMING || data.empty())
     return;
+  // Diagnostics: level + frame count of what WE send (your voice).
+  {
+    const int16_t *s = reinterpret_cast<const int16_t *>(data.data());
+    size_t n = data.size() / 2;
+    int32_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+      int32_t a = s[i] < 0 ? -s[i] : s[i];
+      if (a > p)
+        p = a;
+    }
+    dbg_mic_peak_ = p;
+    dbg_tx_audio_++;
+  }
 
 #ifdef FACE2FACE_USE_AEC
   // AEC gating (as recommended by Espressif/esp-sr): only run echo cancellation
@@ -948,6 +961,19 @@ void Face2Face::pump_ringtone_() {
 void Face2Face::play_audio_(const uint8_t *pcm, uint32_t len) {
   if (spk_ == nullptr || len == 0 || state_ != STATE_STREAMING)
     return;
+  // Diagnostics: level + frame count of what we PLAY (audio received from peer).
+  {
+    const int16_t *s = reinterpret_cast<const int16_t *>(pcm);
+    size_t n = len / 2;
+    int32_t p = 0;
+    for (size_t i = 0; i < n; i++) {
+      int32_t a = s[i] < 0 ? -s[i] : s[i];
+      if (a > p)
+        p = a;
+    }
+    dbg_spk_peak_ = p;
+    dbg_rx_audio_++;
+  }
   // Only feed the speaker once its I2S driver is actually RUNNING. On a shared
   // I2S bus the speaker can fail to start ("Parent bus is busy"); pushing PCM
   // into a non-started speaker pipeline corrupts its buffers -> crash on hangup.
