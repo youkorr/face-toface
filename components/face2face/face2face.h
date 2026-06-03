@@ -8,6 +8,10 @@
 #include <vector>
 #include <string>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+
 // Forward-declared ESPHome peers (full includes pulled in the .cpp).
 namespace esphome {
 namespace esp_cam_sensor {
@@ -172,6 +176,11 @@ class Face2Face : public Component {
   void jpeg_deinit_();
   void pump_video_tx_();
   bool decode_jpeg_(const uint8_t *jpeg, uint32_t len);
+  // Dedicated video-TX task (capture+encode+send). Runs at a higher priority
+  // than the ESPHome main loop so a busy LVGL can't throttle the video.
+  static void video_tx_task_(void *param);
+  void start_video_task_();
+  void stop_video_task_();
 
   // lazy media resources: allocated on call start, freed on hangup so RAM/PSRAM
   // stay free while idle on the LVGL UI.
@@ -239,6 +248,11 @@ class Face2Face : public Component {
   uint16_t tx_audio_frame_id_{0};
   uint32_t last_tx_us_{0};
   uint32_t last_enc_warn_ms_{0};  // throttle encode-error logs (per-frame)
+
+  // Video-TX task + JPEG codec mutex (encode in task vs decode in main loop).
+  TaskHandle_t video_task_{nullptr};
+  volatile bool video_task_run_{false};
+  SemaphoreHandle_t jpeg_mutex_{nullptr};
 
   // presence
   uint32_t last_peer_rx_ms_{0};

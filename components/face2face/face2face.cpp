@@ -57,6 +57,8 @@ void Face2Face::setup() {
     this->mark_failed();
     return;
   }
+  // Guards the shared HW JPEG peripheral (TX task encodes, main loop decodes).
+  jpeg_mutex_ = xSemaphoreCreateMutex();
   // Heavy media buffers (hardware JPEG codec, RGB framebuffer, AEC) are NOT
   // allocated here. They are created lazily in ensure_media_() when a call
   // starts and freed in release_media_() on hangup, so almost no RAM/PSRAM is
@@ -123,15 +125,8 @@ void Face2Face::loop() {
     }
   }
 
-  // Send our video while streaming, rate-limited to framerate_.
-  if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
-    uint32_t now = micros();
-    uint32_t period = 1000000UL / framerate_;
-    if (now - last_tx_us_ >= period) {
-      last_tx_us_ = now;
-      pump_video_tx_();
-    }
-  }
+  // Video TX no longer runs here: it has its own FreeRTOS task (started in
+  // start_streaming_) so a busy LVGL main loop can't throttle the frame rate.
 }
 
 void Face2Face::dump_config() {
@@ -215,6 +210,8 @@ void Face2Face::start_streaming_() {
     camera_->start_streaming();
     camera_started_ = true;
   }
+  // Run video capture+encode+send in its own task (decoupled from LVGL).
+  start_video_task_();
   // Defer mic+speaker start: micro_wake_word/voice_assistant (stopped in
   // on_streaming) need a moment to release the shared I2S bus, otherwise the
   // speaker fails with "Parent bus is busy". The actual start happens in loop()
@@ -228,6 +225,7 @@ void Face2Face::start_streaming_() {
 void Face2Face::go_idle_() {
   bool was_active = (state_ != STATE_IDLE);
   set_state_(STATE_IDLE);
+  stop_video_task_();  // stop the video TX task before tearing down media
   audio_due_ms_ = 0;  // cancel any pending deferred audio start
   ring_spk_started_ = false;  // ringtone (if any) is stopped via spk_->stop() below
   if (audio_enabled_) {
@@ -590,6 +588,45 @@ void Face2Face::release_media_() {
   audio_asm_ = FrameAssembler{};
 }
 
+// ===========================================================================
+// Dedicated video-TX task: capture + JPEG encode + UDP send, paced to
+// framerate_, at a priority above the ESPHome main loop so a busy LVGL can't
+// throttle the frame rate (which also starved the audio stream).
+// ===========================================================================
+void Face2Face::start_video_task_() {
+  if (video_task_ != nullptr || !jpeg_ready_ || camera_ == nullptr)
+    return;
+  video_task_run_ = true;
+  // Priority 4: above the ESPHome loop (1) so LVGL can't stall it, below the
+  // audio tasks (5) so voice stays smooth. Pinned to core 1 like the audio.
+  xTaskCreatePinnedToCore(video_tx_task_, "f2f_video_tx", 8192, this, 4, &video_task_, 1);
+}
+
+void Face2Face::stop_video_task_() {
+  if (video_task_ == nullptr)
+    return;
+  video_task_run_ = false;
+  // Wait for the task to actually exit before media buffers are freed.
+  for (int i = 0; i < 200 && video_task_ != nullptr; i++)
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+void Face2Face::video_tx_task_(void *param) {
+  auto *self = static_cast<Face2Face *>(param);
+  TickType_t last = xTaskGetTickCount();
+  while (self->video_task_run_) {
+    uint32_t fr = self->framerate_ == 0 ? 1 : self->framerate_;
+    TickType_t period = pdMS_TO_TICKS(1000 / fr);
+    if (period == 0)
+      period = 1;
+    if (self->state_ == STATE_STREAMING && self->jpeg_ready_ && self->camera_ != nullptr)
+      self->pump_video_tx_();
+    vTaskDelayUntil(&last, period);
+  }
+  self->video_task_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
 void Face2Face::pump_video_tx_() {
   esp_cam_sensor::SimpleBufferElement *el = nullptr;
   uint8_t *rgb = nullptr;
@@ -654,8 +691,13 @@ void Face2Face::pump_video_tx_() {
   cfg.width = ow;
   cfg.height = oh;
   uint32_t out_size = 0;
+  // Serialise with the main loop's decode (shared HW JPEG peripheral).
+  if (jpeg_mutex_ != nullptr)
+    xSemaphoreTake(jpeg_mutex_, portMAX_DELAY);
   esp_err_t err = jpeg_encoder_process(reinterpret_cast<jpeg_encoder_handle_t>(jpeg_enc_), &cfg, enc_in_,
                                        out_bytes, enc_out_, enc_out_cap_, &out_size);
+  if (jpeg_mutex_ != nullptr)
+    xSemaphoreGive(jpeg_mutex_);
   if (err == ESP_OK && out_size > 0) {
     send_frame_(F2F_STREAM_VIDEO, enc_out_, out_size, video_sock_);
   } else {
@@ -692,8 +734,14 @@ bool Face2Face::decode_jpeg_(const uint8_t *jpeg, uint32_t len) {
   cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
 
   uint32_t out_len = 0;
-  if (jpeg_decoder_process(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_), &cfg, dec_in_, len, dec_out_,
-                           dec_out_cap_, &out_len) != ESP_OK)
+  // Serialise with the video-TX task's encode (shared HW JPEG peripheral).
+  if (jpeg_mutex_ != nullptr)
+    xSemaphoreTake(jpeg_mutex_, portMAX_DELAY);
+  esp_err_t derr = jpeg_decoder_process(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_), &cfg, dec_in_, len,
+                                        dec_out_, dec_out_cap_, &out_len);
+  if (jpeg_mutex_ != nullptr)
+    xSemaphoreGive(jpeg_mutex_);
+  if (derr != ESP_OK)
     return false;
 
   remote_w_ = info.width;
