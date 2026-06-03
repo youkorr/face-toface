@@ -332,7 +332,8 @@ bool FdAudio::init_afe_() {
   // processing thread). Start the dedicated feed task; read_mic_afe_ fetches.
   afe_feed_run_ = true;
   TaskHandle_t t = nullptr;
-  xTaskCreatePinnedToCore(afe_feed_task_, "fdaudio_afe_feed", 4096, this, 5, &t, 1);
+  // 8 KB stack: the AFE feed() runs WebRTC NS/AGC DSP and overflows a 4 KB stack.
+  xTaskCreatePinnedToCore(afe_feed_task_, "fdaudio_afe_feed", 8192, this, 5, &t, 1);
   afe_feed_handle_ = (void *) t;
   ESP_LOGI(TAG, "AFE ready (AEC+NS+AGC, chunk=%d, channels=%d, fmt=MNR)", afe_chunk_, afe_nch_);
   return true;
