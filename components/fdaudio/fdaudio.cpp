@@ -241,7 +241,11 @@ bool FdAudio::init_aec_() {
   aec_in_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
   aec_ref_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
   aec_out_ = static_cast<int16_t *>(heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DEFAULT));
-  ref_ring_.assign((size_t) aec_chunk_ * 32, 0);
+  // Keep the reference SHORT (~2 frames) so it stays time-aligned with the echo
+  // (like 'previous_frame'): a long FIFO let the reference lag by up to ~0.5 s,
+  // which the AEC can't align -> echo leaks. 2 chunks (~32 ms) matches the
+  // acoustic+codec delay and is well within filter_length.
+  ref_ring_.assign((size_t) aec_chunk_ * 2, 0);
   ref_head_ = 0;
   ref_count_ = 0;
   aec_ready_ = (aec_in_ && aec_ref_ && aec_out_);
