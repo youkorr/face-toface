@@ -96,8 +96,13 @@ void Face2Face::rx_task_(void *param) {
     int maxfd = (self->video_sock_ > self->audio_sock_ ? self->video_sock_ : self->audio_sock_) + 1;
     struct timeval tv = {0, 100000};  // 100 ms: wake to re-check rx_task_run_
     int r = ::select(maxfd, &rfds, nullptr, nullptr, &tv);
-    if (r > 0)
+    if (r > 0) {
       self->poll_receive_();
+      // Yield so the main loop (LVGL) and the idle task get CPU. Without this,
+      // a continuous RX stream lets this priority-4 task starve loopTask
+      // (priority 1) on the same core -> "task_wdt: loopTask did not reset".
+      vTaskDelay(1);
+    }
     esp_task_wdt_reset();
   }
   esp_task_wdt_delete(NULL);
