@@ -156,6 +156,9 @@ class Face2Face : public Component {
   int get_spk_level() const { return (int) dbg_spk_peak_; }
   uint32_t get_audio_tx() const { return dbg_tx_audio_; }
   uint32_t get_audio_rx() const { return dbg_rx_audio_; }
+  // C6 link throughput (kbit/s, updated ~1 Hz during a call).
+  int get_tx_kbps() const { return dbg_tx_kbps_; }
+  int get_rx_kbps() const { return dbg_rx_kbps_; }
   const char *state_str() const {
     switch (state_) {
       case STATE_IDLE: return "IDLE";
@@ -256,6 +259,12 @@ class Face2Face : public Component {
   volatile int32_t dbg_spk_peak_{0};
   volatile uint32_t dbg_tx_audio_{0};
   volatile uint32_t dbg_rx_audio_{0};
+  // Throughput meter (C6 link): bytes since last tick + computed kbit/s.
+  uint32_t thru_tx_bytes_{0};
+  uint32_t thru_rx_bytes_{0};
+  uint32_t last_thru_ms_{0};
+  int dbg_tx_kbps_{0};
+  int dbg_rx_kbps_{0};
 
   // triggers
   Trigger<> *on_ringing_{nullptr};

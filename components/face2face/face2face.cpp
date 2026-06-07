@@ -10,6 +10,7 @@
 #include <lwip/netdb.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "esp_task_wdt.h"  // subscribe the video task so camera WDT-resets don't warn
 
 // Peer ESPHome components
 #include "esphome/components/esp_cam_sensor/esp_cam_sensor_camera.h"
@@ -125,6 +126,20 @@ void Face2Face::loop() {
     }
   }
 
+  // Throughput meter: report the actual C6 link usage (kbit/s) once a second
+  // during a call, and keep it for the LVGL debug page.
+  if (state_ == STATE_STREAMING && now_ms - last_thru_ms_ >= 1000) {
+    uint32_t dt = now_ms - last_thru_ms_;
+    if (dt > 0) {
+      dbg_tx_kbps_ = (int) ((uint64_t) thru_tx_bytes_ * 8 / dt);  // bytes*8/ms = kbit/s
+      dbg_rx_kbps_ = (int) ((uint64_t) thru_rx_bytes_ * 8 / dt);
+      ESP_LOGI(TAG, "C6 link: TX=%d kbps  RX=%d kbps", dbg_tx_kbps_, dbg_rx_kbps_);
+    }
+    thru_tx_bytes_ = 0;
+    thru_rx_bytes_ = 0;
+    last_thru_ms_ = now_ms;
+  }
+
   // Video TX no longer runs here: it has its own FreeRTOS task (started in
   // start_streaming_) so a busy LVGL main loop can't throttle the frame rate.
 }
@@ -214,6 +229,10 @@ void Face2Face::start_streaming_() {
     camera_->start_streaming();
     camera_started_ = true;
   }
+  // Reset the throughput meter for this call.
+  thru_tx_bytes_ = 0;
+  thru_rx_bytes_ = 0;
+  last_thru_ms_ = millis();
   // Run video capture+encode+send in its own task (decoupled from LVGL).
   start_video_task_();
   // Defer mic+speaker start: micro_wake_word/voice_assistant (stopped in
@@ -404,8 +423,10 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
     int tries = 0;
     while (true) {
       int sent = ::sendto(sock, pkt, F2F_HEADER_SIZE + plen, 0, (struct sockaddr *) &dst, sizeof(dst));
-      if (sent >= 0)
+      if (sent >= 0) {
+        thru_tx_bytes_ += (uint32_t) (F2F_HEADER_SIZE + plen);
         break;
+      }
       if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM || errno == ENOBUFS) {
         if (++tries > 4000)
           break;  // give up on this fragment rather than stall forever
@@ -422,17 +443,19 @@ void Face2Face::poll_receive_() {
   uint8_t buf[F2F_HEADER_SIZE + F2F_MAX_PAYLOAD];
   for (int i = 0; i < 64; i++) {
     int n = ::recv(video_sock_, buf, sizeof(buf), 0);
-    if (n > 0)
+    if (n > 0) {
+      thru_rx_bytes_ += (uint32_t) n;
       handle_packet_(buf, n, F2F_STREAM_VIDEO);
-    else
+    } else
       break;
   }
   if (audio_enabled_) {
     for (int i = 0; i < 48; i++) {
       int n = ::recv(audio_sock_, buf, sizeof(buf), 0);
-      if (n > 0)
+      if (n > 0) {
+        thru_rx_bytes_ += (uint32_t) n;
         handle_packet_(buf, n, F2F_STREAM_AUDIO);
-      else
+      } else
         break;
     }
   }
@@ -620,6 +643,10 @@ void Face2Face::stop_video_task_() {
 
 void Face2Face::video_tx_task_(void *param) {
   auto *self = static_cast<Face2Face *>(param);
+  // Subscribe to the task WDT so the camera driver's internal esp_task_wdt_reset()
+  // (called from capture_frame in THIS task) finds us -> no "task not found" spam.
+  // Harmless no-op if the task WDT is disabled.
+  esp_task_wdt_add(NULL);
   TickType_t last = xTaskGetTickCount();
   while (self->video_task_run_) {
     uint32_t fr = self->framerate_ == 0 ? 1 : self->framerate_;
@@ -628,8 +655,10 @@ void Face2Face::video_tx_task_(void *param) {
       period = 1;
     if (self->state_ == STATE_STREAMING && self->jpeg_ready_ && self->camera_ != nullptr)
       self->pump_video_tx_();
+    esp_task_wdt_reset();
     vTaskDelayUntil(&last, period);
   }
+  esp_task_wdt_delete(NULL);
   self->video_task_ = nullptr;
   vTaskDelete(nullptr);
 }
