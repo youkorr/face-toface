@@ -193,6 +193,13 @@ class Face2Face : public Component {
   void send_frame_(F2FStream stream, const uint8_t *data, uint32_t len, int sock);
   void handle_packet_(const uint8_t *buf, size_t len, F2FStream expected);
   void send_ping_();
+  // Dedicated RX task: recv + reassembly + JPEG decode + audio play, decoupled
+  // from the main loop so the received video isn't throttled by LVGL. CTRL
+  // packets are deferred to the main loop (they fire LVGL automations).
+  static void rx_task_(void *param);
+  void *rx_task_handle_{nullptr};
+  volatile bool rx_task_run_{false};
+  volatile int8_t pending_ctrl_{-1};  // CTRL type received in rx_task_, run in loop()
 
   // hardware JPEG codec
   bool jpeg_init_();

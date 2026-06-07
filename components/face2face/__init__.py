@@ -93,7 +93,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUDIO_PORT, default=9001): cv.port,
         cv.Optional(CONF_WIDTH, default=640): cv.int_range(min=160, max=1920),
         cv.Optional(CONF_HEIGHT, default=480): cv.int_range(min=120, max=1080),
-        cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
+        cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=60),
         cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
         cv.Optional(CONF_SWAP_COLORS, default=True): cv.boolean,
         cv.Optional(CONF_SCALE, default=3): cv.int_range(min=1, max=8),

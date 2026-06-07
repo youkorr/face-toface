@@ -70,15 +70,52 @@ void Face2Face::setup() {
   if (audio_enabled_ && spk_ != nullptr) {
     spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
   }
+  // Receive + reassemble + JPEG-decode + audio-play in a dedicated task so the
+  // displayed (received) video isn't throttled by the LVGL main loop.
+  if (sockets_ready_) {
+    rx_task_run_ = true;
+    TaskHandle_t t = nullptr;
+    xTaskCreatePinnedToCore(rx_task_, "f2f_rx", 8192, this, 4, &t, 1);
+    rx_task_handle_ = (void *) t;
+  }
   ESP_LOGCONFIG(TAG, "face2face ready (peer=%s v:%u a:%u) - media allocated per-call",
                 peer_ip_.c_str(), video_port_, audio_port_);
+}
+
+// Dedicated receive task: waits for UDP data (select), then reads + reassembles
+// + decodes/plays. Runs for the device lifetime so call signaling (CTRL/PING)
+// is always handled. CTRL is deferred to the main loop (LVGL safety).
+void Face2Face::rx_task_(void *param) {
+  auto *self = static_cast<Face2Face *>(param);
+  esp_task_wdt_add(NULL);
+  while (self->rx_task_run_) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(self->video_sock_, &rfds);
+    FD_SET(self->audio_sock_, &rfds);
+    int maxfd = (self->video_sock_ > self->audio_sock_ ? self->video_sock_ : self->audio_sock_) + 1;
+    struct timeval tv = {0, 100000};  // 100 ms: wake to re-check rx_task_run_
+    int r = ::select(maxfd, &rfds, nullptr, nullptr, &tv);
+    if (r > 0)
+      self->poll_receive_();
+    esp_task_wdt_reset();
+  }
+  esp_task_wdt_delete(NULL);
+  self->rx_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
 }
 
 void Face2Face::loop() {
   if (!sockets_ready_)
     return;
 
-  poll_receive_();
+  // CTRL packets are received in rx_task_ but processed here (they fire LVGL
+  // automations via on_streaming/on_idle, which must run on the main loop).
+  if (pending_ctrl_ >= 0) {
+    uint8_t t = (uint8_t) pending_ctrl_;
+    pending_ctrl_ = -1;
+    on_ctrl_(t);
+  }
 
   uint32_t now_ms = millis();
 
@@ -473,8 +510,10 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
   if (hdr->stream == F2F_STREAM_PING)
     return;
   if (hdr->stream == F2F_STREAM_CTRL) {
+    // Defer to the main loop: on_ctrl_ fires LVGL automations (not thread-safe
+    // from this rx task).
     if (hdr->payload_len >= 1 && F2F_HEADER_SIZE + 1 <= len)
-      on_ctrl_(buf[F2F_HEADER_SIZE]);
+      pending_ctrl_ = (int8_t) buf[F2F_HEADER_SIZE];
     return;
   }
   if (hdr->stream != expected)
