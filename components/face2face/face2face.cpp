@@ -140,8 +140,16 @@ void Face2Face::loop() {
     last_thru_ms_ = now_ms;
   }
 
-  // Video TX no longer runs here: it has its own FreeRTOS task (started in
-  // start_streaming_) so a busy LVGL main loop can't throttle the frame rate.
+  // Send our video while streaming, rate-limited to framerate_ (in the main
+  // loop, like before: the loop feeds the WDT itself so it can't be starved).
+  if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
+    uint32_t now = micros();
+    uint32_t period = 1000000UL / framerate_;
+    if (now - last_tx_us_ >= period) {
+      last_tx_us_ = now;
+      pump_video_tx_();
+    }
+  }
 }
 
 void Face2Face::dump_config() {
@@ -233,8 +241,6 @@ void Face2Face::start_streaming_() {
   thru_tx_bytes_ = 0;
   thru_rx_bytes_ = 0;
   last_thru_ms_ = millis();
-  // Run video capture+encode+send in its own task (decoupled from LVGL).
-  start_video_task_();
   // Defer mic+speaker start: micro_wake_word/voice_assistant (stopped in
   // on_streaming) need a moment to release the shared I2S bus, otherwise the
   // speaker fails with "Parent bus is busy". The actual start happens in loop()
@@ -248,7 +254,6 @@ void Face2Face::start_streaming_() {
 void Face2Face::go_idle_() {
   bool was_active = (state_ != STATE_IDLE);
   set_state_(STATE_IDLE);
-  stop_video_task_();  // stop the video TX task before tearing down media
   audio_due_ms_ = 0;  // cancel any pending deferred audio start
   ring_spk_started_ = false;  // ringtone (if any) is stopped via spk_->stop() below
   if (audio_enabled_) {
@@ -616,51 +621,6 @@ void Face2Face::release_media_() {
   new_remote_frame_ = false;
   video_asm_ = FrameAssembler{};
   audio_asm_ = FrameAssembler{};
-}
-
-// ===========================================================================
-// Dedicated video-TX task: capture + JPEG encode + UDP send, paced to
-// framerate_, at a priority above the ESPHome main loop so a busy LVGL can't
-// throttle the frame rate (which also starved the audio stream).
-// ===========================================================================
-void Face2Face::start_video_task_() {
-  if (video_task_ != nullptr || !jpeg_ready_ || camera_ == nullptr)
-    return;
-  video_task_run_ = true;
-  // Priority 4: above the ESPHome loop (1) so LVGL can't stall it, below the
-  // audio tasks (5) so voice stays smooth. Pinned to core 1 like the audio.
-  xTaskCreatePinnedToCore(video_tx_task_, "f2f_video_tx", 8192, this, 4, &video_task_, 1);
-}
-
-void Face2Face::stop_video_task_() {
-  if (video_task_ == nullptr)
-    return;
-  video_task_run_ = false;
-  // Wait for the task to actually exit before media buffers are freed.
-  for (int i = 0; i < 200 && video_task_ != nullptr; i++)
-    vTaskDelay(pdMS_TO_TICKS(5));
-}
-
-void Face2Face::video_tx_task_(void *param) {
-  auto *self = static_cast<Face2Face *>(param);
-  // Subscribe to the task WDT so the camera driver's internal esp_task_wdt_reset()
-  // (called from capture_frame in THIS task) finds us -> no "task not found" spam.
-  // Harmless no-op if the task WDT is disabled.
-  esp_task_wdt_add(NULL);
-  TickType_t last = xTaskGetTickCount();
-  while (self->video_task_run_) {
-    uint32_t fr = self->framerate_ == 0 ? 1 : self->framerate_;
-    TickType_t period = pdMS_TO_TICKS(1000 / fr);
-    if (period == 0)
-      period = 1;
-    if (self->state_ == STATE_STREAMING && self->jpeg_ready_ && self->camera_ != nullptr)
-      self->pump_video_tx_();
-    esp_task_wdt_reset();
-    vTaskDelayUntil(&last, period);
-  }
-  esp_task_wdt_delete(NULL);
-  self->video_task_ = nullptr;
-  vTaskDelete(nullptr);
 }
 
 void Face2Face::pump_video_tx_() {
