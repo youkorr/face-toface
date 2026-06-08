@@ -1,212 +1,495 @@
 # face-toface
 
-Appel **vidéo + audio en peer-to-peer (IP directe, UDP)**, façon FaceTime, entre
-**deux ESP32-P4** sous **ESPHome / Home Assistant**.
+**FaceTime-like, peer-to-peer audio + video calls between ESP32-P4 boards**, as
+native [ESPHome](https://esphome.io) external components.
 
-Conçu pour s'intégrer à **votre** stack Waveshare existante :
-- caméra **OV5647** via votre composant `esp_cam_sensor` (`tab5_cam`)
-- micro **ES7210** (`esp32_microphone`) + HP **ES8311** (`esp32_speaker`)
-- affichage **MIPI-DSI + LVGL 9.5** (canvas)
-- codec **JPEG matériel** natif du P4 (`esp_driver_jpeg`)
+The project ships three independent components that work together (or on their own):
 
-> ⚠️ **État : composant complet, à valider sur carte.** La logique réseau
-> (UDP, fragmentation/réassemblage), l'intégration caméra (`get_current_rgb_frame`),
-> micro/HP (callbacks ESPHome) et le pipeline JPEG matériel sont écrits avec les
-> vraies API. Je **ne peux pas compiler du firmware P4 ici** : prévoyez 1-2
-> itérations sur le matériel, notamment pour les noms d'enums `esp_driver_jpeg`
-> qui varient légèrement selon la version d'ESP-IDF (voir §6).
+| Component | What it does | Network |
+|-----------|--------------|---------|
+| **`face2face`** | Direct-IP (UDP) video + audio call between two P4 boards. Hardware-JPEG video, raw-PCM audio, built-in call signaling, presence, ringtone. | Same LAN |
+| **`fdaudio`** | Full-duplex I2S audio engine (mic **and** speaker on one I2S port) exposing standard ESPHome `microphone` + `speaker` platforms. Drives ES8311/ES8388 + ES7210 over `esp_codec_dev`. | — |
+| **`webrtc_call`** | Real WebRTC call (ICE/STUN/TURN, apprtc signaling) so any P4 can call any other P4 **across different networks** — true "FaceTime anywhere". | Internet |
+
+Everything is built on **Espressif APIs only** (esp_codec_dev, esp-sr, the P4
+hardware JPEG codec, esp-webrtc-solution). No paid services, no cloud lock-in.
+
+> ⚠️ **Status: components are feature-complete, validate on hardware.** The author
+> cannot compile P4 firmware in this environment. Expect 1–2 iterations on the
+> board, mostly for IDF enum/field names that drift slightly between ESP-IDF
+> versions. Each component degrades gracefully and logs what it is doing.
 
 ---
 
-## 1. Le flux (chaque carte fait les deux sens)
+## Table of contents
+
+1. [Hardware](#1-hardware)
+2. [`face2face` — the LAN video call](#2-face2face--the-lan-video-call)
+3. [`fdaudio` — full-duplex audio (the duplex)](#3-fdaudio--full-duplex-audio-the-duplex)
+4. [AEC & AFE — echo cancellation (optional, resource-heavy)](#4-aec--afe--echo-cancellation-optional-resource-heavy)
+5. [Voice assistant integration](#5-voice-assistant-integration)
+6. [`webrtc_call` — cross-network calls (signaling + coturn + app)](#6-webrtc_call--cross-network-calls-signaling--coturn--app)
+7. [Examples](#7-examples)
+8. [Build notes & troubleshooting](#8-build-notes--troubleshooting)
+9. [Sources](#9-sources)
+
+---
+
+## 1. Hardware
+
+Designed around the common Waveshare / M5Stack Tab5 ESP32-P4 stack, but the pins
+are all configurable:
+
+- **Camera**: OV5647 (or any sensor) via the `esp_cam_sensor` MIPI-CSI component,
+  or a USB UVC camera.
+- **Audio codec**: ES8311 **or** ES8388 for playback, ES7210 for the mic, on a
+  single I2S port (full-duplex) over I2C control.
+- **Display**: MIPI-DSI + LVGL 9.x (canvas widget for the remote video).
+- **Video codec**: the P4's **hardware JPEG engine** (`esp_driver_jpeg`).
+- **WiFi**: ESP32-C6 over SDIO (esp_hosted) on most P4 boards.
+
+> The P4 has **one** hardware JPEG engine shared by encode **and** decode. For a
+> bidirectional call the two directions serialize on it — this, not the WiFi
+> link, is the practical frame-rate ceiling at full resolution. Use `scale:` to
+> trade resolution for frame rate (see below).
+
+---
+
+## 2. `face2face` — the LAN video call
+
+A self-contained, FaceTime-like P2P call between **two** ESP32-P4 boards on the
+**same LAN**. No external intercom dependency, no server.
 
 ```
-  ÉMISSION (TX)                                   RÉCEPTION (RX)
-  ┌──────────────────────────┐                    ┌──────────────────────────┐
-  │ tab5_cam (OV5647)         │                    │  UDP :9000 (vidéo)        │
-  │  get_current_rgb_frame()  │                    │   réassemblage JPEG       │
-  │        │ RGB565           │                    │        │                  │
-  │  JPEG enc MATÉRIEL  ──────┼── UDP :9000 ──►     │  JPEG dec MATÉRIEL        │
-  │        │ JPEG             │                     │        │ RGB565           │
-  │  sendto(peer)             │                     │  remote_rgb565()          │
-  │                           │                     │        │ (lambda YAML)    │
-  │ esp32_microphone          │                     │  lv_canvas_set_buffer     │
-  │  callback PCM 16k ────────┼── UDP :9001 ──►      │  ──► LVGL canvas          │
-  │                           │   (audio)            │                          │
-  │ speaker.play() ◄──────────┼── UDP :9001 ───      │  micro du pair            │
-  └──────────────────────────┘                     └──────────────────────────┘
+  TX (each board sends)                         RX (each board receives)
+  ┌───────────────────────────┐                 ┌───────────────────────────┐
+  │ camera RGB565             │                  │  UDP :9000 (video)        │
+  │   → HW JPEG encode  ──────┼─ UDP :9000 ─►    │   reassemble → HW JPEG    │
+  │   → sendto(peer)          │                  │   decode → RGB565         │
+  │                           │                  │   → LVGL canvas           │
+  │ microphone PCM 16k ───────┼─ UDP :9001 ─►    │  speaker.play(peer PCM)   │
+  └───────────────────────────┘                 └───────────────────────────┘
 ```
 
-- **Vidéo** : RGB565 (caméra) → **JPEG matériel** → UDP. À la réception :
-  réassemblage → **JPEG matériel** → RGB565 → canvas LVGL. MJPEG = sans état
-  entre images, donc une image perdue est simplement sautée (latence faible).
-- **Audio** : PCM 16 bit / 16 kHz mono brut sur UDP (~32 ko/s). Le micro ESPHome
-  pousse les blocs via callback ; on les rejoue sur le speaker du pair.
-- **Signalisation d'appel** : **native, intégrée à face2face** (aucune dépendance
-  externe). Messages de contrôle UDP `CALL/RING/ANSWER/HANGUP/DECLINE` + machine
-  à états `IDLE → OUTGOING/RINGING → STREAMING`.
+- **Video**: RGB565 → hardware JPEG → UDP. MJPEG is stateless between frames, so
+  a lost frame is simply skipped (low latency, loss-tolerant).
+- **Audio**: raw 16-bit / mono PCM over UDP (~32 KB/s at 16 kHz).
+- **Call signaling**: **native**, built in. UDP control messages
+  (`INVITE/RING/ANSWER/HANGUP/DECLINE`) with an
+  `IDLE → OUTGOING/RINGING → STREAMING` state machine.
+- **Presence**: a 1 Hz UDP heartbeat tells each board whether the peer is
+  reachable (`id(f2f).peer_online()`), even outside a call.
 
-### Signalisation d'appel (absorbée de l'intercom, sans en dépendre)
+### Why a custom component (not `camera_web_server`)
 
-L'ancienne version reposait sur l'external `esphome-intercom`. Ce qui était bon
-(audio PCM 16k/16-bit mono, FSM d'appel, états) a été **réimplémenté nativement**
-dans `face2face`, puis la dépendance a été **supprimée**.
+`camera_web_server` (MJPEG over HTTP/TCP) does not hold up for real-time. Sending
+JPEG over **UDP** directly to the peer means no server, no TCP head-of-line
+blocking, minimal latency, and dropped frames instead of stalls.
 
-**Actions** (pour boutons HA / clics LVGL) :
+### Actions, triggers, presence
 
 ```yaml
+# Actions (wire to HA buttons / LVGL taps)
 on_press:
-  - face2face.call: f2f      # appeler le pair
-  - face2face.answer: f2f    # décrocher
-  - face2face.hangup: f2f    # raccrocher / annuler
-  - face2face.decline: f2f   # refuser
+  - face2face.call: f2f        # place a call to the peer
+  - face2face.answer: f2f      # accept an incoming call
+  - face2face.hangup: f2f      # hang up / cancel
+  - face2face.decline: f2f     # reject an incoming call
 ```
 
-**Triggers** (déclarés dans le bloc `face2face:`) :
-`on_ringing`, `on_outgoing_call`, `on_streaming`, `on_idle`
-(+ option `auto_answer: true` pour un mode interphone, `ring_timeout`).
+```yaml
+# Triggers (declared inside the face2face: block)
+face2face:
+  on_ringing:        # peer is calling us
+  on_outgoing_call:  # we are calling
+  on_streaming:      # call connected
+  on_idle:           # call ended / declined / timed out
+```
 
-### Annulation d'écho (AEC) — ESP-SR, intégrée
+```cpp
+// Presence, usable in lambdas / template sensors
+id(f2f).peer_online()         // true if a packet was seen from the peer < 4 s ago
+id(f2f).peer_last_seen_ms()   // millis() of the last packet from the peer
+```
 
-Le mains-libres est géré par l'**AEC d'Espressif ESP-SR** (`esp_aec`), intégrée
-directement dans face2face. À chaque trame micro : `aec_process(mic, référence)`
-où la **référence** = l'audio reçu du pair (ce que joue le HP). Le résultat
-nettoyé est envoyé au pair.
+### Ringtone
+
+`face2face` plays the embedded **`ring.aac`** (AAC) as the ringtone. It is
+decoded **once** at runtime by Espressif's `esp_audio_codec` (standalone AAC
+decoder), resampled to the audio rate, cached as PCM, and looped on the speaker
+while ringing. If AAC decoding fails it falls back to a synthesized beep.
 
 ```yaml
 face2face:
-  enable_aec: true            # défaut ; pulle esp-sr et compile le chemin AEC
-  aec_mode: voip_high_perf    # sr_low_cost | voip_low_cost | voip_high_perf | fd_*
-  aec_filter_length: 4        # 1-8 (plus grand = plus de RAM/CPU)
+  ringtone: true     # default; embedded ring.aac
+  # ringtone: false  # silent (use your own sound via on_ringing + media_player)
 ```
 
-- `enable_aec: false` → aucun appel esp-sr, aucune dépendance ajoutée.
-- Trames alignées via un ring buffer de référence ; si le HP est silencieux, la
-  référence est nulle (pas d'écho à annuler).
-- Buffers `int16` alignés 16 o (`heap_caps_aligned_alloc`), 16 kHz mono, comme
-  recommandé par Espressif.
+See [`example/ringtone-options.yaml`](example/ringtone-options.yaml) for using
+your own file through a `media_player` instead.
 
-## 2. Pourquoi un composant custom (et pas `camera_web_server`)
+### Configuration
 
-`camera_web_server` (MJPEG over HTTP/TCP) ne tient pas bien la charge en temps
-réel. `face2face` envoie le JPEG en **UDP** directement au pair : pas de serveur,
-pas de TCP, latence minimale, et on saute les images perdues au lieu de bloquer.
-
-## 3. Protocole sur le fil (UDP)
-
-Chaque image JPEG / bloc audio est **fragmenté** en paquets ≤ 1400 o. En-tête
-`F2FHeader` (`face2face.h`) : `magic, stream, flags, frame_id, frag_index,
-frag_count, frame_size, payload_len`. Le récepteur réassemble par
-`(stream, frame_id)` et abandonne les fragments d'un `frame_id` plus ancien.
-
-## 4. Fichiers
-
-```
-components/face2face/
-  __init__.py      # schéma YAML, refs caméra/micro/HP
-  face2face.h      # protocole UDP + classe Component
-  face2face.cpp    # UDP + JPEG matériel + caméra + audio
-example/
-  standalone-facetime.yaml      # CONFIG COMPLÈTE prête à flasher (carte vierge)
-  face2face-snippet.yaml        # bloc face2face (vidéo + audio + appel) à coller
-  lvgl-call-page.yaml           # page d'appel LVGL 9.5 moderne (1024x600) + présence
+```yaml
+face2face:
+  id: f2f
+  # peer_ip: "192.168.1.51"        # the OTHER board's IP (optional; see below)
+  camera_id: tab5_cam              # esp_cam_sensor MIPI-DSI camera
+  microphone_id: esp32_microphone  # any ESPHome microphone (e.g. fdaudio)
+  speaker_id: esp32_speaker        # any ESPHome speaker (e.g. fdaudio)
+  amplifier: pa_enable             # optional PA enable switch, on during a call
+  width: 640
+  height: 480
+  framerate: 15
+  jpeg_quality: 40                 # 10..100 (85 is a sane practical max)
+  scale: 3                         # downscale factor before JPEG (1..8)
+  enable_audio: true
+  audio_sample_rate: 16000
+  ring_timeout: 30s
+  auto_answer: false               # true = intercom mode
+  ringtone: true
+  # --- AEC (see §4) ---
+  enable_aec: true
+  aec_mode: sr_low_cost
+  aec_filter_length: 4
+  audio_start_delay: 1500ms        # wait for wake-word to release the I2S bus
 ```
 
-> ✅ Le composant face2face (vidéo + audio + appel), la page d'appel et la présence
-> sont déjà **fusionnés** dans votre `waveshare (3).yaml` (page LVGL `call_page`),
-> **sans aucune dépendance intercom**. `example/standalone-facetime.yaml` est une
-> config minimale séparée et complète.
+| Option | Default | Notes |
+|--------|---------|-------|
+| `peer_ip` | `0.0.0.0` | IP of the **other** board. Best set at runtime from HA (see below). |
+| `camera_id` | — (required) | `esp_cam_sensor` camera providing RGB565 frames. |
+| `microphone_id` / `speaker_id` | — | Any ESPHome mic/speaker; pair with `fdaudio` for full-duplex. |
+| `amplifier` | — | `switch` toggled on for the call duration. |
+| `video_port` / `audio_port` | 9000 / 9001 | UDP ports. |
+| `width` / `height` | 640 / 480 | Must match the camera RGB output. |
+| `framerate` | 15 | 1..60. |
+| `jpeg_quality` | 40 | 10..100. |
+| `scale` | 3 | Downscale before encode; the main FPS/latency lever. |
+| `audio_sample_rate` | 16000 | Raw PCM rate over UDP. |
+| `ring_timeout` | 30s | Auto-hangup if unanswered. |
+| `auto_answer` | false | Intercom-style auto-pickup. |
+| `ringtone` | true | Embedded `ring.aac`. |
 
-## 4bis. Présence : « l'autre est-il connecté ? »
+#### Setting `peer_ip` from Home Assistant (recommended)
 
-`face2face` envoie un **heartbeat UDP** (1/s) au pair, en permanence (même hors
-appel). Chaque carte sait donc si l'autre est joignable :
-
-```cpp
-id(f2f).peer_online()        // true si paquet reçu du pair < 4 s
-id(f2f).peer_last_seen_ms()  // millis() du dernier paquet reçu
-```
-
-Exposé en YAML via un `binary_sensor` template (→ Home Assistant) et une pastille
-verte/grise dans la barre de statut LVGL (voir `example/lvgl-call-page.yaml`).
-
-## 5. Intégration YAML
-
-Voir `example/face2face-snippet.yaml`. L'essentiel :
-
-### IP du correspondant (`peer_ip`)
-
-`peer_ip` = l'IP de l'**autre** carte (le correspondant), pas la sienne. Elle est
-**optionnelle** dans le YAML : le plus pratique est de la saisir depuis **Home
-Assistant** via une entité `text` (mémorisée au reboot), qui met l'IP à jour à
-chaud sans recompiler :
+Give each board a static IP, then set the **other** board's IP at runtime so you
+never recompile to change it:
 
 ```yaml
 text:
   - platform: template
-    name: "IP correspondant"
+    name: "Peer IP"
     id: peer_ip_input
     mode: text
     optimistic: true
-    restore_value: true            # persiste après reboot
+    restore_value: true            # persists across reboots
     pattern: '^(\d{1,3}\.){3}\d{1,3}$'
     on_value:
       - lambda: "id(f2f).set_peer_ip(x);"
 ```
 
-`id(f2f).set_peer_ip(...)` est sûr à chaud (ignore une valeur vide). Donnez à
-chaque carte une IP fixe et saisissez l'IP de l'autre dans ce champ.
+#### Displaying the remote video (LVGL)
+
+A `canvas` widget plus an `interval` that calls `lv_canvas_set_buffer(...)` with
+`id(f2f).remote_rgb565()`. See
+[`example/lvgl-call-page.yaml`](example/lvgl-call-page.yaml) for a complete
+1024×600 call page with a presence dot.
+
+---
+
+## 3. `fdaudio` — full-duplex audio (the duplex)
+
+`fdaudio` runs **one** I2S port in TX **and** RX at the same time, so the mic and
+speaker are live simultaneously — that is the "duplex" you need for a real call.
+It drives ES8311/ES8388 (playback) + ES7210 (mic) through `esp_codec_dev`, and
+exposes **standard ESPHome platforms**:
+
+- a `microphone` platform → usable by `voice_assistant`, `face2face`, etc.
+- a `speaker` platform → usable by `media_player`, TTS, `face2face`, etc.
+
+So nothing downstream needs to know about `fdaudio`; it is a drop-in mic+speaker.
+
+```yaml
+# The engine (one per board)
+fdaudio:
+  id: audio_engine
+  bclk_pin: 12
+  lrclk_pin: 10
+  din_pin: 11          # mic data in (ES7210)
+  dout_pin: 9          # speaker data out (ES8311/ES8388)
+  mclk_pin: 13         # optional (use_mclk)
+  i2c_port: 0
+  output_codec: es8311 # es8311 | es8388
+  output_address: 0x18
+  mic_address: 0x40
+  output_volume: 70
+  sample_rate: 16000        # rate exposed to ESPHome
+  codec_sample_rate: 48000  # actual I2S clock (P4 + ES7210 want 48k; mic decimated)
+  mic_gain_db: 37.5         # ES7210 analog PGA
+  mic_channels: 1           # ES7210 channel bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8
+  mic_agc: 10000            # auto-boost weak mic to this peak (0 = off)
+  mic_digital_gain: 1.0     # fixed software boost (alternative to AGC)
+  noise_gate: 0             # attenuate ambient noise below this amplitude (0 = off)
+  echo_suppression: 0       # % mic ducking while speaker plays (call echo; 0 = off)
+  enable_aec: true          # simple esp-sr AEC (see §4)
+  use_afe: false            # full esp-sr AFE — heavy (see §4)
+
+# The standard ESPHome platforms backed by it
+microphone:
+  - platform: fdaudio
+    id: esp32_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: esp32_speaker
+    fdaudio_id: audio_engine
+```
+
+### Key design points
+
+- **48 kHz codec, 16 kHz mic.** Many P4 boards only clock the ES7210 correctly at
+  48 kHz, so the engine runs the codec at `codec_sample_rate` (48 kHz) and
+  **decimates** the mic down to `sample_rate` (16 kHz) for wake-word/STT. The
+  speaker therefore plays at 48 kHz; the `fdaudio` speaker upsamples your stream
+  (e.g. 16 kHz call audio → 48 kHz) and applies `media_player` volume/mute in
+  software.
+- **`mic_agc`** is the usual fix for *faint call / weak wake-word* audio — it
+  auto-boosts a quiet mic to a target peak. Use it instead of hand-tuning
+  `mic_digital_gain`.
+- **`echo_suppression`** is a cheap, per-call mic-ducking knob (0 by default so
+  it never breaks `voice_assistant` barge-in). `face2face` can raise it at
+  runtime for the call only: `id(audio_engine).set_echo_suppression(85);`.
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `bclk_pin` / `lrclk_pin` / `din_pin` / `dout_pin` | — (required) | I2S pins. |
+| `mclk_pin` / `use_mclk` | -1 / true | Master clock (some codecs need it). |
+| `i2c_port` | 0 | I2C bus for codec control. |
+| `output_codec` | es8311 | `es8311` or `es8388`. |
+| `output_address` / `mic_address` | 0x18 / 0x40 | I2C addresses. |
+| `output_volume` | 70 | 0..100. |
+| `sample_rate` | 16000 | Rate exposed to ESPHome. |
+| `codec_sample_rate` | 48000 | Real I2S clock; integer multiple of `sample_rate`. |
+| `mic_gain_db` | 37.5 | ES7210 analog gain (0..42 dB). |
+| `mic_channels` | 1 | ES7210 input bitmask. |
+| `mic_agc` | 0 | Target peak for auto-gain (~10000 for calls). |
+| `mic_digital_gain` | 1.0 | Fixed software boost (1..16). |
+| `noise_gate` | 0 | Ambient-noise gate threshold (~250–500). |
+| `echo_suppression` | 0 | % mic ducking while playing (~80–90 kills call echo). |
+| `enable_aec` | true | Simple esp-sr AEC. |
+| `use_afe` | false | Full esp-sr AFE (heavy). |
+
+---
+
+## 4. AEC & AFE — echo cancellation (optional, resource-heavy)
+
+Hands-free calling needs **acoustic echo cancellation**: the far-end audio coming
+out of the speaker must be removed from the mic so the other side does not hear
+themselves. Two paths are available, both from **Espressif ESP-SR**, both
+**optional**.
+
+### `enable_aec` — the lightweight path (recommended)
+
+A simple `aec_create` filter. For each mic frame it runs
+`aec_process(mic, reference)` where the **reference** is the audio just played
+from the peer, aligned with a short FIFO (~2 frames, i.e. "the previous frame").
+Low CPU; good enough for most rooms.
+
+In `face2face`:
 
 ```yaml
 face2face:
-  id: f2f
-  # peer_ip: "192.168.1.51"   # facultatif : sinon défini via le texte HA
-  camera_id: tab5_cam
-  microphone_id: esp32_microphone
-  speaker_id: media_resampling_speaker   # resampler 16k -> 48k
-  width: 640
-  height: 480
-  framerate: 15
-  jpeg_quality: 40
+  enable_aec: true
+  aec_mode: sr_low_cost   # sr_low_cost | sr_high_perf | voip_low_cost | voip_high_perf | fd_low_cost | fd_high_perf
+  aec_filter_length: 4    # 1..8 (longer = more RAM/CPU = longer echo tail handled)
 ```
 
-Affichage : un widget `canvas` (`id: remote_video`) + un `interval` qui appelle
-`lv_canvas_set_buffer(...)` avec `id(f2f).remote_rgb565()`. Self-view local : votre
-`lvgl_camera_display` existant sur un petit canvas.
+In `fdaudio`: `enable_aec: true`.
 
-## 6. À valider / ajuster sur carte
+### `use_afe` — the full AFE (AEC + NS + AGC)
 
-1. **`width`/`height`** doivent correspondre à la sortie RGB de `tab5_cam`
-   (vous êtes en `800x800` ; mettez la même chose ou ajoutez un redimensionnement).
-2. **Enums `esp_driver_jpeg`** : selon votre ESP-IDF, vérifiez les noms exacts
-   dans `driver/jpeg_encode.h` / `driver/jpeg_decode.h` :
-   `JPEG_ENCODE_IN_FORMAT_RGB565`, `JPEG_DOWN_SAMPLING_YUV420`,
-   `JPEG_DECODE_OUT_FORMAT_RGB565`, `JPEG_DEC_RGB_ELEMENT_ORDER_RGB`,
-   `JPEG_ENC_ALLOC_INPUT_BUFFER`, etc.
-3. **Speaker** : `media_resampling_speaker` (sortie 48 kHz) accepte le PCM 16 kHz
-   via `set_audio_stream_info(16, 1, 16000)`. Si l'audio est trop rapide/lent,
-   c'est ce mapping qu'il faut ajuster.
-4. **Débit** : à 640x480@15fps q=40, comptez ~3-6 Mbps. Si saccades, baissez
-   `framerate`, la résolution ou `jpeg_quality`.
-5. **WiFi via ESP-Hosted (C6)** : les deux cartes sur le même LAN.
+The complete esp-sr **AFE** (Audio Front-End: WebRTC noise suppression + AGC +
+AEC with a properly aligned reference). It is the most thorough echo/noise fix —
+**but it is heavy**. In testing it can consume most of one core continuously and
+starve the rest of the pipeline, so it is **off by default**:
 
-6. **AEC / esp-sr** : `enable_aec: true` (défaut) ajoute le composant managé
-   `espressif/esp-sr` (gros). À la 1ʳᵉ compilation, vérifiez la `ref` esp-sr dans
-   `__init__.py` (par défaut `master`) et l'espace flash. Si vous partagez le micro
-   avec `voice_assistant`/`micro_wake_word`, coupez-les pendant l'appel (le micro
-   ne peut servir deux pipelines de capture simultanés proprement).
+```yaml
+fdaudio:
+  use_afe: true   # full AFE; expect high CPU — measure before shipping
+```
 
-## 7. Pistes d'évolution
+> **In our testing, both AEC and especially the AFE are expensive.** They remain
+> **options** precisely so you can pick the trade-off for your board and room:
+> start with `enable_aec: true` + a little `echo_suppression:`, and only reach for
+> `use_afe: true` if you specifically need WebRTC-grade NS/AGC and can spare the
+> CPU. Set `enable_aec: false` / `use_afe: false` to compile **none** of esp-sr
+> (no managed component pulled, smaller image).
 
-- **H.264** au lieu de MJPEG (votre `CONFIG_ESP_H264_DUAL_TASK` est déjà activé) :
-  meilleur débit, mais gestion des I-frames sur UDP à coder.
-- **Jitter buffer audio** (petit tampon de ré-ordonnancement) pour lisser le réseau.
-- **Délai de référence AEC** ajustable si l'écho persiste (aligner ref/mic).
-- **Découverte** via Home Assistant au lieu d'IP codée en dur.
+Notes:
+- Enabling either path pulls the `espressif/esp-sr` managed component (large) and
+  defines `FDAUDIO_USE_AEC` / `FACE2FACE_USE_AEC`.
+- Buffers are 16-byte-aligned `int16`, 16 kHz mono, per Espressif's guidance.
+- esp-sr master depends on `esp-dsp==1.8.0` (matches the project's `esp-dl`/`esp-dsp`
+  pins, so `face_detection`/wake-word can coexist).
 
-## Sources
+---
 
-- Codec JPEG matériel P4 (`esp_driver_jpeg`) : ESP-IDF `components/esp_driver_jpeg`
-- AEC ESP-SR : <https://docs.espressif.com/projects/esp-sr/en/latest/esp32p4/audio_front_end/README.html>
-- Protocole repris (puis réimplémenté) de : <https://github.com/n-IA-hane/esphome-intercom>
-- Vos composants : <https://github.com/youkorr/test2_esp_video_esphome>, <https://github.com/youkorr/lvgl_9.5>
+## 5. Voice assistant integration
+
+Because `fdaudio` exposes a standard `microphone` and `speaker`, Home Assistant
+**voice assistant**, `micro_wake_word`, and TTS work unchanged:
+
+```yaml
+micro_wake_word:
+  models: [okay_nabu]
+  microphone: esp32_microphone
+
+voice_assistant:
+  microphone: esp32_microphone
+  speaker: esp32_speaker
+```
+
+> **One mic, one capture pipeline at a time.** The ES7210 mic cannot cleanly feed
+> two capture consumers simultaneously. `fdaudio` reconciles listeners with
+> reference-counting, but in practice you should **pause `voice_assistant` /
+> `micro_wake_word` during a `face2face` call** (and resume on `on_idle`). Use
+> `audio_start_delay` in `face2face` to wait for the wake-word to release the I2S
+> bus before the call grabs the mic.
+
+---
+
+## 6. `webrtc_call` — cross-network calls (signaling + coturn + app)
+
+`face2face` is LAN-only (direct IP). To let **any** ESP32-P4 call **any** other
+P4 across **different networks / the internet** — real "FaceTime anywhere" — you
+need real WebRTC: a **signaling server** to introduce the two peers and
+**STUN/TURN** for NAT traversal. `webrtc_call` wraps Espressif's
+[`esp-webrtc-solution`](https://github.com/espressif/esp-webrtc-solution)
+(apprtc signaling, `esp_peer` ICE, MJPEG + G.711 codecs, GMF capture/render).
+
+> **Important — hardware ownership.** `esp-webrtc` **owns** the camera (CSI), the
+> I2S codec, and the LCD via Espressif's GMF (`esp_capture` / `av_render`). It
+> therefore **conflicts** with `esp_video` / `fdaudio` / LVGL-on-MIPI. Use
+> `webrtc_call` in a **dedicated "WebRTC-mode" firmware**: do **not** also declare
+> `face2face` / `fdaudio` / a MIPI display in the same config. This is also why
+> `webrtc_call` has no `width`/`height`/`framerate` knobs — that would duplicate
+> `face2face`; the WebRTC codec tracks the camera capture internally.
+
+### What you need to run (server side)
+
+You host two things (e.g. on a home server / Unraid, internet-reachable):
+
+1. **A signaling server** — apprtc-compatible (room based: both boards join the
+   same room and get connected).
+2. **coturn** — a STUN + TURN server. STUN is enough on many networks; **TURN is
+   the relay fallback** required for symmetric NATs (e.g. mobile/CGNAT).
+
+Minimal `coturn` idea (`turnserver.conf`):
+
+```
+listening-port=3478
+fingerprint
+lt-cred-mech
+user=esp32:yourpassword
+realm=yourdomain.com
+# expose 3478/udp+tcp (and a relay port range) to the internet
+```
+
+### What you need (client side)
+
+The two boards run `webrtc_call` firmware. To call **from a phone/PC** as well,
+you point a small **WebRTC web app** (the apprtc-style client that ships with
+`esp-webrtc-solution`, or your own) at the **same signaling server + room**. Any
+standards-compliant WebRTC client that joins the room can talk to a board.
+
+### Configuration
+
+```yaml
+webrtc_call:
+  id: rtc
+  signaling_url: "https://signal.yourdomain.com"   # your apprtc server (required)
+  room: "myroom"                                    # both peers join the same room
+  board_type: "ESP32_P4_DEV"                        # a codec_board definition...
+  # ...or describe YOUR hardware inline instead of a predefined board:
+  # board_config: |
+  #   i2c: {name: i2c, sda: 7, scl: 8}
+  #   i2s: {name: i2s, mclk: 13, bclk: 12, ws: 10, dout: 9, din: 11}
+  #   out: {name: es8311, bus: i2c, pa: 53}
+  #   in:  {name: es7210, bus: i2c}
+  #   ...camera + lcd lines...
+  stun_server: "stun:stun.l.google.com:19302"
+  turn_url: "turn:turn.yourdomain.com:3478"
+  turn_username: "esp32"
+  turn_password: "yourpassword"
+  auto_connect: false        # true = connect as soon as the room is joined
+
+# Call control
+on_...:
+  - webrtc_call.start: rtc   # enable the peer connection
+  - webrtc_call.hangup: rtc  # disable it
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `signaling_url` | — (required) | apprtc signaling server URL. |
+| `room` | `esp_room` | Peers joining the same room are connected. |
+| `board_type` | `ESP32_P4_DEV` | A `codec_board` definition name. |
+| `board_config` | — | Inline `codec_board` definition (parsed at runtime) — describe your exact i2c/i2s/codec/camera/lcd pinout in YAML, no predefined board needed. |
+| `stun_server` | — | `stun:host:port`. |
+| `turn_url` / `turn_username` / `turn_password` | — | TURN relay (NAT fallback). |
+| `auto_connect` | false | Auto-connect on room join, else use `webrtc_call.start`. |
+
+> **Status: this path is the newest and needs end-to-end testing on hardware**
+> (server deployment + two boards + a browser client). MJPEG is used over WebRTC
+> on purpose: it is loss-tolerant, unlike SW-decoded H.264 over lossy links.
+
+---
+
+## 7. Examples
+
+| File | What it shows |
+|------|---------------|
+| [`example/standalone-facetime.yaml`](example/standalone-facetime.yaml) | Complete, flashable face2face config from scratch. |
+| [`example/face2face-snippet.yaml`](example/face2face-snippet.yaml) | Just the `face2face:` block to paste into your YAML. |
+| [`example/lvgl-call-page.yaml`](example/lvgl-call-page.yaml) | LVGL 9.x call page (1024×600) with remote video + presence dot. |
+| [`example/ringtone-options.yaml`](example/ringtone-options.yaml) | Default `ring.aac`, silent, or your own file via `media_player`. |
+| [`example/fdaudio-waveshare-full.yaml`](example/fdaudio-waveshare-full.yaml) | Full Waveshare audio (fdaudio + duplex + voice assistant). |
+| [`example/fdaudio-habbit-full.yaml`](example/fdaudio-habbit-full.yaml) | Full Habbit board audio config. |
+| [`example/waveshare-face2face.yaml`](example/waveshare-face2face.yaml) / [`habbit-face2face.yaml`](example/habbit-face2face.yaml) | Per-board face2face configs. |
+
+---
+
+## 8. Build notes & troubleshooting
+
+- **Hardware JPEG enums** (`esp_driver_jpeg`): names vary slightly across
+  ESP-IDF. If the build complains, check `driver/jpeg_encode.h` /
+  `driver/jpeg_decode.h` in *your* IDF (`JPEG_ENCODE_IN_FORMAT_RGB565`,
+  `JPEG_DECODE_OUT_FORMAT_RGB565`, `JPEG_DOWN_SAMPLING_YUV420`, …).
+- **`esp_codec_dev` + I2C**: `fdaudio` forces the new `i2c_master` driver
+  (`CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=false`); the legacy I2C driver aborts at
+  boot on IDF 5.4+ ("driver_ng is not allowed to be used with this old driver").
+- **`width`/`height`** must match the camera's RGB output, or add a resize.
+- **Stutter** (face2face): the shared JPEG engine is usually the limit. Lower
+  `framerate`, raise `scale`, or lower `jpeg_quality` — in that order.
+- **Faint call audio / weak wake-word**: set `fdaudio` `mic_agc: 10000`; enable
+  the `amplifier:` switch in `face2face` so the PA is on during the call.
+- **Echo**: start with `enable_aec: true` and a little `echo_suppression:`; only
+  use `use_afe: true` if you can afford the CPU (see §4).
+- **esp-sr size/refs**: enabling AEC/AFE pulls `espressif/esp-sr` (`ref: master`);
+  watch flash usage on the first build.
+- **WiFi**: both `face2face` boards must be on the same LAN. For `webrtc_call`,
+  the boards need outbound internet to your signaling + TURN servers.
+
+---
+
+## 9. Sources
+
+- P4 hardware JPEG (`esp_driver_jpeg`): ESP-IDF `components/esp_driver_jpeg`.
+- ESP-SR AEC/AFE: <https://docs.espressif.com/projects/esp-sr/en/latest/esp32p4/audio_front_end/README.html>
+- WebRTC stack: <https://github.com/espressif/esp-webrtc-solution>
+- Audio codec lib (AAC ringtone): `espressif/esp_audio_codec` (esp-adf-libs).
+- coturn (STUN/TURN): <https://github.com/coturn/coturn>
+- Author's related components: <https://github.com/youkorr>
+</content>
