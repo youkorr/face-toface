@@ -40,8 +40,9 @@ hardware JPEG codec, esp-webrtc-solution). No paid services, no cloud lock-in.
 Designed around the common Waveshare / M5Stack Tab5 ESP32-P4 stack, but the pins
 are all configurable:
 
-- **Camera**: OV5647 (or any sensor) via the `esp_cam_sensor` MIPI-CSI component,
-  or a USB UVC camera.
+- **Camera**: OV5647 (or any sensor) via the `esp_cam_sensor` MIPI-CSI component
+  (+ the `esp_video` pipeline), or a USB UVC camera. These live in a **separate
+  repo** — see [Camera setup](#camera-setup-external-repo-esp_video--esp_cam_sensor).
 - **Audio codec**: ES8311 **or** ES8388 for playback, ES7210 for the mic, on a
   single I2S port (full-duplex) over I2C control.
 - **Display**: MIPI-DSI + LVGL 9.x (canvas widget for the remote video).
@@ -85,6 +86,70 @@ A self-contained, FaceTime-like P2P call between **two** ESP32-P4 boards on the
 `camera_web_server` (MJPEG over HTTP/TCP) does not hold up for real-time. Sending
 JPEG over **UDP** directly to the peer means no server, no TCP head-of-line
 blocking, minimal latency, and dropped frames instead of stalls.
+
+### Camera setup (external repo: `esp_video` + `esp_cam_sensor`)
+
+`face2face` does **not** drive the camera itself — it consumes RGB565 frames from
+the **`esp_cam_sensor`** camera component, which lives in a **separate repository**
+together with the `esp_video` pipeline (CSI/ISP/JPEG) and `lvgl_camera_display`:
+
+> 📷 **<https://github.com/youkorr/test2_esp_video_esphome>**
+> components: `esp_video`, `esp_cam_sensor`, `lvgl_camera_display`
+
+Pull it via `external_components` (alongside this repo's `face2face`), then
+configure the video pipeline + the sensor, and hand the sensor's id to
+`face2face` as `camera_id:`.
+
+```yaml
+external_components:
+  # Camera + video pipeline (the OTHER repo)
+  - source:
+      type: git
+      url: https://github.com/youkorr/test2_esp_video_esphome
+      ref: claude/nifty-dijkstra-gdUqZ      # use the branch that matches your board
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: always
+  # This repo (face2face / fdaudio / webrtc_call)
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [face2face, fdaudio]
+    refresh: always
+
+# Video pipeline: CSI input, ISP, hardware JPEG, external clock to the sensor
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+
+# The actual sensor — this id is what face2face's camera_id points at
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647          # your sensor (ov5647, ov02c10, sc202cs, ...)
+  resolution: "640x480"
+  framerate: 30
+  jpeg_quality: 15
+
+face2face:
+  id: f2f
+  camera_id: tab5_cam          # <-- the esp_cam_sensor id above
+  width: 640                   # MUST match the sensor RGB output
+  height: 480
+  # ...
+```
+
+Notes:
+- The `esp_cam_sensor` **`resolution`** and the `face2face` **`width`/`height`**
+  must agree (or add a resize) — see [§8](#8-build-notes--troubleshooting).
+- **USB UVC** cameras are also supported by `esp_video` (`/dev/videoN`); point
+  `camera_id` at the corresponding sensor. Plain MIPI-CSI (OV5647) is the tested
+  path.
+- For the `webrtc_call` firmware the camera is owned by GMF instead and described
+  through `codec_board` / `board_config` — see [§6](#6-webrtc_call--cross-network-calls-signaling--coturn--app).
 
 ### Actions, triggers, presence
 
@@ -491,5 +556,7 @@ on_...:
 - WebRTC stack: <https://github.com/espressif/esp-webrtc-solution>
 - Audio codec lib (AAC ringtone): `espressif/esp_audio_codec` (esp-adf-libs).
 - coturn (STUN/TURN): <https://github.com/coturn/coturn>
+- Camera components (`esp_video` / `esp_cam_sensor` / `lvgl_camera_display`):
+  <https://github.com/youkorr/test2_esp_video_esphome>
 - Author's related components: <https://github.com/youkorr>
 </content>
