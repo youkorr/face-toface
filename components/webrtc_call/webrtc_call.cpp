@@ -55,16 +55,26 @@ void WebrtcCall::dump_config() {
 // ===========================================================================
 bool WebrtcCall::media_init_() {
 #ifdef WEBRTC_CALL_ENABLED
-  // TODO (next step): port media_sys_buildup():
-  //   - esp_video_enc_register_default(); esp_audio_enc_register_default();
-  //     esp_video_dec_register_default(); esp_audio_dec_register_default();
-  //   - build capture: create_video_source() (MIPI-CSI) + audio dev src +
-  //     esp_capture_open() with a sink (MJPEG video + G711A audio) ->
-  //     store capture_ (esp_capture_handle_t).
-  //   - build player: av_render_alloc_i2s_render() + av_render_alloc_lcd_render()
-  //     + av_render_open() -> store player_ (av_render_handle_t).
-  // This needs the exact esp_capture / av_render APIs (next fetch + iterate).
-  ESP_LOGW(TAG, "media_init_: GMF capture/render not yet ported (step 2)");
+  // Port of videocall_demo/media_sys.c (step 2, in progress). The exact struct
+  // fields + the board handles (mic codec dev, I2S codec, LCD panel from
+  // board.c) are being finalized from the verbatim sources.
+  //
+  // 1) Register default codecs:
+  //      esp_video_enc_register_default(); esp_audio_enc_register_default();
+  //      esp_video_dec_register_default(); esp_audio_dec_register_default();
+  // 2) Capture (camera + mic):
+  //      vsrc = esp_capture_new_video_v4l2_src({ .dev_name = "/dev/video0" });
+  //      asrc = esp_capture_new_audio_dev_src(<record codec dev = ES7210>);
+  //      esp_capture_open({ .sync_mode = ESP_CAPTURE_SYNC_MODE_AUDIO,
+  //                         .audio_src = asrc, .video_src = vsrc }, &capture_);
+  //      sink: video MJPEG (width_/height_/framerate_) + audio G711A 8k mono.
+  // 3) Player (speaker + LCD):
+  //      audio = av_render_alloc_i2s_render(<I2S/codec cfg>);
+  //      video = av_render_alloc_lcd_render(<LCD panel cfg>);
+  //      av_render_open({ audio, video, fifo sizes }, &player_);
+  //
+  // Needs board.c (codec + LCD init) to fill the handles -> implemented next.
+  ESP_LOGW(TAG, "media_init_: porting media_sys.c/board.c (paste them to finalize)");
   media_ready_ = false;
   return false;
 #else
