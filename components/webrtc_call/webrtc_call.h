@@ -23,6 +23,7 @@ class WebrtcCall : public Component {
   void set_signaling_url(const std::string &u) { signaling_url_ = u; }
   void set_room(const std::string &r) { room_ = r; }
   void set_board_type(const std::string &b) { board_type_ = b; }
+  void set_board_config(const std::string &c) { board_config_ = c; }
   void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
   void set_framerate(uint8_t f) { framerate_ = f; }
   void set_auto_connect(bool a) { auto_connect_ = a; }
@@ -45,6 +46,7 @@ class WebrtcCall : public Component {
   std::string signaling_url_;
   std::string room_{"esp_room"};
   std::string board_type_{"ESP32_P4_DEV"};  // codec_board definition name
+  std::string board_config_;                // inline codec_board definition (optional)
   uint16_t width_{320}, height_{240};
   uint8_t framerate_{15};
   bool auto_connect_{false};

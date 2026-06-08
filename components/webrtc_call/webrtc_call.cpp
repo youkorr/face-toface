@@ -67,7 +67,14 @@ bool WebrtcCall::media_init_() {
   // ---- Board init (port of board.c) ----
   // codec_board sets up the I2S + codec (ES8311/ES8388/ES7210) and the LCD, and
   // exposes get_record_handle()/get_playback_handle()/board_get_lcd_handle().
-  // The board_type must match a codec_board definition for THIS hardware.
+  // Either an inline definition (board_config:, parsed at runtime) or a board
+  // name registered in codec_board (board_type:). The inline path lets the user
+  // describe their exact Waveshare/Tab5 pinout in YAML without a predefined board.
+  if (!board_config_.empty()) {
+    codec_board_parse_all_config(board_config_.c_str());
+    ESP_LOGI(TAG, "codec_board: parsed inline board_config (%u bytes)",
+             static_cast<unsigned>(board_config_.size()));
+  }
   set_codec_board_type(board_type_.c_str());
   codec_init_cfg_t ccfg = {};
   ccfg.reuse_dev = false;  // record + playback at the same time

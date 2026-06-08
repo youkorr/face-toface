@@ -26,6 +26,7 @@ DEPENDENCIES = ["esp32", "network"]
 CONF_SIGNALING_URL = "signaling_url"
 CONF_ROOM = "room"
 CONF_BOARD_TYPE = "board_type"
+CONF_BOARD_CONFIG = "board_config"
 CONF_FRAMERATE = "framerate"
 CONF_STUN_SERVER = "stun_server"
 CONF_TURN_URL = "turn_url"
@@ -54,6 +55,10 @@ CONFIG_SCHEMA = cv.Schema(
         # Must match a board registered in the codec_board component for YOUR
         # hardware (Waveshare/Tab5 -> custom definition needed).
         cv.Optional(CONF_BOARD_TYPE, default="ESP32_P4_DEV"): cv.string,
+        # Inline codec_board definition (text, codec_board format). When set,
+        # it is parsed at runtime (codec_board_parse_all_config) so you describe
+        # YOUR hardware (i2c/i2s/codec/camera/lcd) without a predefined board.
+        cv.Optional(CONF_BOARD_CONFIG): cv.string,
         cv.Optional(CONF_WIDTH, default=320): cv.int_range(min=160, max=1280),
         cv.Optional(CONF_HEIGHT, default=240): cv.int_range(min=120, max=720),
         cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
@@ -77,6 +82,8 @@ async def to_code(config):
     cg.add(var.set_signaling_url(config[CONF_SIGNALING_URL]))
     cg.add(var.set_room(config[CONF_ROOM]))
     cg.add(var.set_board_type(config[CONF_BOARD_TYPE]))
+    if CONF_BOARD_CONFIG in config:
+        cg.add(var.set_board_config(config[CONF_BOARD_CONFIG]))
     cg.add(var.set_resolution(config[CONF_WIDTH], config[CONF_HEIGHT]))
     cg.add(var.set_framerate(config[CONF_FRAMERATE]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
