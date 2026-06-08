@@ -24,8 +24,6 @@ class WebrtcCall : public Component {
   void set_room(const std::string &r) { room_ = r; }
   void set_board_type(const std::string &b) { board_type_ = b; }
   void set_board_config(const std::string &c) { board_config_ = c; }
-  void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
-  void set_framerate(uint8_t f) { framerate_ = f; }
   void set_auto_connect(bool a) { auto_connect_ = a; }
   void set_stun_server(const std::string &s) { stun_server_ = s; }
   void set_turn(const std::string &url, const std::string &user, const std::string &pass) {
@@ -47,7 +45,9 @@ class WebrtcCall : public Component {
   std::string room_{"esp_room"};
   std::string board_type_{"ESP32_P4_DEV"};  // codec_board definition name
   std::string board_config_;                // inline codec_board definition (optional)
-  uint16_t width_{320}, height_{240};
+  // Video format for the WebRTC codec. Not a YAML knob (would duplicate
+  // face2face); it tracks the camera capture. Defaults are a sane fallback.
+  uint16_t width_{640}, height_{480};
   uint8_t framerate_{15};
   bool auto_connect_{false};
   std::string stun_server_, turn_url_, turn_user_, turn_pass_;

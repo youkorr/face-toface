@@ -18,7 +18,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import esp32
-from esphome.const import CONF_ID, CONF_WIDTH, CONF_HEIGHT
+from esphome.const import CONF_ID
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32", "network"]
@@ -27,7 +27,6 @@ CONF_SIGNALING_URL = "signaling_url"
 CONF_ROOM = "room"
 CONF_BOARD_TYPE = "board_type"
 CONF_BOARD_CONFIG = "board_config"
-CONF_FRAMERATE = "framerate"
 CONF_STUN_SERVER = "stun_server"
 CONF_TURN_URL = "turn_url"
 CONF_TURN_USER = "turn_username"
@@ -59,9 +58,9 @@ CONFIG_SCHEMA = cv.Schema(
         # it is parsed at runtime (codec_board_parse_all_config) so you describe
         # YOUR hardware (i2c/i2s/codec/camera/lcd) without a predefined board.
         cv.Optional(CONF_BOARD_CONFIG): cv.string,
-        cv.Optional(CONF_WIDTH, default=320): cv.int_range(min=160, max=1280),
-        cv.Optional(CONF_HEIGHT, default=240): cv.int_range(min=120, max=720),
-        cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
+        # Note: video resolution/framerate are intentionally NOT YAML knobs here
+        # (that duplicated face2face). The WebRTC codec uses a fixed internal
+        # default (640x480@15, see webrtc_call.h) tracking the camera capture.
         # NAT traversal (coturn on your server). STUN is enough on many networks;
         # TURN is the relay fallback for symmetric NATs.
         cv.Optional(CONF_STUN_SERVER): cv.string,
@@ -84,8 +83,6 @@ async def to_code(config):
     cg.add(var.set_board_type(config[CONF_BOARD_TYPE]))
     if CONF_BOARD_CONFIG in config:
         cg.add(var.set_board_config(config[CONF_BOARD_CONFIG]))
-    cg.add(var.set_resolution(config[CONF_WIDTH], config[CONF_HEIGHT]))
-    cg.add(var.set_framerate(config[CONF_FRAMERATE]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
     if CONF_STUN_SERVER in config:
         cg.add(var.set_stun_server(config[CONF_STUN_SERVER]))
