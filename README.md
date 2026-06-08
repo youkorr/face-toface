@@ -109,7 +109,7 @@ external_components:
       ref: claude/nifty-dijkstra-gdUqZ      # use the branch that matches your board
     components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: always
-  # This repo (face2face / fdaudio / webrtc_call)
+  # This repo — only the LAN components here (NOT webrtc_call, see note below)
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
@@ -150,6 +150,13 @@ Notes:
   path.
 - For the `webrtc_call` firmware the camera is owned by GMF instead and described
   through `codec_board` / `board_config` — see [§6](#6-webrtc_call--cross-network-calls-signaling--coturn--app).
+
+> **Why isn't `webrtc_call` in the `external_components` above?** On purpose.
+> `webrtc_call` is a **separate, dedicated firmware**: it owns the camera/I2S/LCD
+> via GMF and conflicts with `face2face` / `fdaudio` / `esp_video`, so it is never
+> combined with them in one config. A webrtc_call build uses its own block —
+> `components: [webrtc_call]`, **without** the camera repo — shown in
+> [§6](#6-webrtc_call--cross-network-calls-signaling--coturn--app).
 
 ### Actions, triggers, presence
 
@@ -471,7 +478,18 @@ standards-compliant WebRTC client that joins the room can talk to a board.
 
 ### Configuration
 
+This is a **dedicated firmware** — its `external_components` pulls **only**
+`webrtc_call` (no camera repo, no `face2face` / `fdaudio`; GMF owns the hardware):
+
 ```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [webrtc_call]      # webrtc_call ONLY — separate from the LAN build
+    refresh: always
+
 webrtc_call:
   id: rtc
   signaling_url: "https://signal.yourdomain.com"   # your apprtc server (required)
