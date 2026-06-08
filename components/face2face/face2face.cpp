@@ -1,9 +1,13 @@
 #include "face2face.h"
 #include "esphome/core/log.h"
+#include "ring_aac.h"
 
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+
+// AAC ringtone decoder (Espressif esp_audio_codec; pulled in __init__.py).
+#include "esp_aac_dec.h"
 
 // lwIP / POSIX sockets (ESP-IDF)
 #include <lwip/sockets.h>
@@ -216,6 +220,7 @@ void Face2Face::start_streaming_() {
     if (spk_ != nullptr)
       spk_->stop();
     ring_spk_started_ = false;
+    ring_pcm_pos_ = 0;
   }
   // Allocate the heavy media buffers now (freed again on hangup).
   if (!ensure_media_()) {
@@ -256,6 +261,7 @@ void Face2Face::go_idle_() {
   set_state_(STATE_IDLE);
   audio_due_ms_ = 0;  // cancel any pending deferred audio start
   ring_spk_started_ = false;  // ringtone (if any) is stopped via spk_->stop() below
+  ring_pcm_pos_ = 0;
   if (audio_enabled_) {
     if (mic_ != nullptr && mic_started_) {
       mic_->stop();
@@ -898,15 +904,115 @@ void Face2Face::on_mic_data_(const std::vector<uint8_t> &data) {
   send_frame_(F2F_STREAM_AUDIO, data.data(), data.size(), audio_sock_);
 }
 
+// Decode the embedded ring.aac (AAC-LC) into a cached PCM buffer, once. The
+// decoder reports the native rate/channels; we keep mono int16 and let the
+// speaker resample. ADTS-framed, fed frame by frame.
+bool Face2Face::decode_ringtone_() {
+  if (ring_decoded_)
+    return !ring_pcm_.empty();
+  ring_decoded_ = true;  // attempt only once, success or not
+
+  void *dec = nullptr;
+  if (esp_aac_dec_open(nullptr, 0, &dec) != ESP_AUDIO_ERR_OK || dec == nullptr) {
+    ESP_LOGW(TAG, "ringtone: AAC decoder open failed, using synth beep");
+    return false;
+  }
+
+  std::vector<uint8_t> out;  // PCM bytes accumulated across frames
+  out.reserve(128 * 1024);
+  std::vector<uint8_t> frame(8192);  // per-call PCM output scratch
+
+  esp_audio_dec_in_raw_t raw = {};
+  raw.buffer = const_cast<uint8_t *>(RING_AAC);
+  raw.len = RING_AAC_LEN;
+  esp_audio_dec_info_t info = {};
+  bool ok = true;
+
+  while (raw.len > 0) {
+    esp_audio_dec_out_frame_t of = {};
+    of.buffer = frame.data();
+    of.len = frame.size();
+    esp_audio_err_t r = esp_aac_dec_decode(dec, &raw, &of, &info);
+    if (r == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+      frame.resize(of.needed_size);
+      continue;  // retry this frame with a bigger buffer
+    }
+    if (r != ESP_AUDIO_ERR_OK) {
+      ESP_LOGW(TAG, "ringtone: AAC decode error %d at %u left", (int) r, raw.len);
+      ok = false;
+      break;
+    }
+    if (of.decoded_size > 0)
+      out.insert(out.end(), of.buffer, of.buffer + of.decoded_size);
+    if (raw.consumed == 0)
+      break;  // no progress -> avoid an infinite loop
+    raw.buffer += raw.consumed;
+    raw.len -= raw.consumed;
+  }
+  esp_aac_dec_close(dec);
+
+  if (!ok || out.empty() || info.sample_rate == 0) {
+    ESP_LOGW(TAG, "ringtone: decode produced no PCM, using synth beep");
+    ring_pcm_.clear();
+    return false;
+  }
+
+  // Source mono samples at the decoder's native rate. For a stereo clip we
+  // down-mix in place into the front of `out`; for mono we read it directly.
+  int16_t *s = reinterpret_cast<int16_t *>(out.data());
+  size_t total = out.size() / sizeof(int16_t);
+  uint8_t ch = info.channel ? info.channel : 1;
+  size_t src_n = total;
+  if (ch >= 2) {
+    src_n = total / ch;
+    for (size_t i = 0, o = 0; o < src_n; o++, i += ch) {
+      int32_t acc = 0;
+      for (uint8_t c = 0; c < ch; c++)
+        acc += s[i + c];
+      s[o] = (int16_t) (acc / ch);
+    }
+  }
+
+  // Resample (linear) to audio_sample_rate_ so it matches the rest of the audio
+  // path and keeps the cached buffer small (44.1 kHz -> 16 kHz ~ 106 KB -> 39 KB).
+  uint32_t src_rate = info.sample_rate;
+  uint32_t dst_rate = audio_sample_rate_;
+  if (src_rate == dst_rate || src_n < 2) {
+    ring_pcm_.assign(s, s + src_n);
+  } else {
+    size_t dst_n = (size_t) ((uint64_t) src_n * dst_rate / src_rate);
+    ring_pcm_.resize(dst_n);
+    for (size_t i = 0; i < dst_n; i++) {
+      double srcpos = (double) i * src_rate / dst_rate;
+      size_t i0 = (size_t) srcpos;
+      double frac = srcpos - i0;
+      int16_t a = s[i0];
+      int16_t b = (i0 + 1 < src_n) ? s[i0 + 1] : a;
+      ring_pcm_[i] = (int16_t) (a + (b - a) * frac);
+    }
+  }
+  ring_pcm_rate_ = dst_rate;
+  ESP_LOGI(TAG, "ringtone: decoded ring.aac -> %u samples @ %u Hz mono (%u KB)",
+           (unsigned) ring_pcm_.size(), (unsigned) ring_pcm_rate_,
+           (unsigned) (ring_pcm_.size() * sizeof(int16_t) / 1024));
+  return true;
+}
+
 void Face2Face::pump_ringtone_() {
   if (spk_ == nullptr)
     return;
+
+  // Lazy one-shot decode of ring.aac. If it fails we fall back to the beep.
+  bool use_pcm = decode_ringtone_() && !ring_pcm_.empty();
+  const uint32_t sr = use_pcm ? ring_pcm_rate_ : audio_sample_rate_;
+
   // Start the speaker once for the duration of the ringing phase.
   if (!ring_spk_started_) {
-    spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, audio_sample_rate_));
+    spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, sr));
     spk_->start();
     ring_spk_started_ = true;
     ring_phase_ = 0;
+    ring_pcm_pos_ = 0;
     last_ring_ms_ = 0;
   }
   // Feed ~40 ms chunks, paced so we don't overflow the speaker buffer.
@@ -915,34 +1021,39 @@ void Face2Face::pump_ringtone_() {
     return;
   last_ring_ms_ = now;
 
-  const uint32_t sr = audio_sample_rate_;
   const size_t samples = sr / 25;  // 40 ms
   static thread_local std::vector<int16_t> buf;
   buf.resize(samples);
 
-  // Ring cadence: caller hears a softer 425 Hz tone; callee a louder 2-tone
-  // "ring ring ... pause" pattern. Period = 4 s: 1 s on, then off.
-  // We derive on/off from a wall-clock cycle so both phases line up.
-  uint32_t cycle = (now % 4000);
-  bool tone_on;
-  double freq;
-  if (state_ == STATE_RINGING) {
-    // callee: ring 0-400ms, gap, ring 600-1000ms, then silence to 4000ms
-    tone_on = (cycle < 400) || (cycle >= 600 && cycle < 1000);
-    freq = 1000.0;  // incoming ring, higher pitch
-  } else {  // STATE_OUTGOING (caller)
-    tone_on = (cycle < 1000);  // 1 s tone, 3 s gap = "ringback"
-    freq = 425.0;
-  }
-
-  for (size_t i = 0; i < samples; i++) {
-    int16_t s = 0;
-    if (tone_on) {
-      double t = (double) ring_phase_ / (double) sr;
-      s = (int16_t) (6000.0 * std::sin(2.0 * M_PI * freq * t));
+  if (use_pcm) {
+    // Stream the decoded ring.aac, looping back to the start when it ends so it
+    // keeps ringing until the call is answered or times out.
+    for (size_t i = 0; i < samples; i++) {
+      if (ring_pcm_pos_ >= ring_pcm_.size())
+        ring_pcm_pos_ = 0;
+      buf[i] = ring_pcm_[ring_pcm_pos_++];
     }
-    buf[i] = s;
-    ring_phase_++;
+  } else {
+    // Fallback synthesised ring: caller 425 Hz, callee 1000 Hz, 1 s on / gap.
+    uint32_t cycle = (now % 4000);
+    bool tone_on;
+    double freq;
+    if (state_ == STATE_RINGING) {
+      tone_on = (cycle < 400) || (cycle >= 600 && cycle < 1000);
+      freq = 1000.0;
+    } else {  // STATE_OUTGOING
+      tone_on = (cycle < 1000);
+      freq = 425.0;
+    }
+    for (size_t i = 0; i < samples; i++) {
+      int16_t s = 0;
+      if (tone_on) {
+        double t = (double) ring_phase_ / (double) sr;
+        s = (int16_t) (6000.0 * std::sin(2.0 * M_PI * freq * t));
+      }
+      buf[i] = s;
+      ring_phase_++;
+    }
   }
   spk_->play(reinterpret_cast<const uint8_t *>(buf.data()), samples * sizeof(int16_t));
 }

@@ -1,11 +1,11 @@
 #pragma once
 // ring.aac — incoming-call ringtone (AAC-LC, 44.1 kHz mono).
 // Sourced from Espressif esp-webrtc-solution doorbell_demo (main/ring.aac).
-// Decoded at runtime by av_render (AAC stream). Embedded as ADTS frames.
+// Decoded to PCM at runtime by esp_aac_dec (esp_audio_codec). ADTS frames.
 #include <cstdint>
 
 namespace esphome {
-namespace webrtc_call {
+namespace face2face {
 
 static const unsigned char RING_AAC[] = {
   0xff,0xf1,0x50,0x40,0x28,0xdf,0xfc,0xde,0x02,0x00,0x4c,0x61,0x76,0x63,0x35,0x39,
@@ -689,5 +689,5 @@ static const unsigned char RING_AAC[] = {
 };
 static const unsigned int RING_AAC_LEN = 10835;
 
-}  // namespace webrtc_call
+}  // namespace face2face
 }  // namespace esphome

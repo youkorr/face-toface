@@ -5,11 +5,14 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# OPTION 1 — Bip synthétisé intégré (par défaut, aucun fichier)
+# OPTION 1 — Sonnerie ring.aac intégrée (par défaut, aucun fichier à fournir)
 # ---------------------------------------------------------------------------
-# Rien à faire : ringtone est true par défaut.
+# Rien à faire : ringtone est true par défaut. La sonnerie ring.aac (AAC) est
+# embarquée dans le composant et décodée à l'exécution (esp_aac_dec), puis
+# jouée en boucle sur le speaker pendant la sonnerie (appel entrant/sortant).
+# Si le décodage AAC échoue, repli automatique sur un bip synthétisé.
 #   face2face:
-#     ringtone: true        # bip généré (425Hz appelant / 1000Hz appelé)
+#     ringtone: true        # sonnerie ring.aac embarquée (par défaut)
 
 # ---------------------------------------------------------------------------
 # OPTION 2 — Aucune sonnerie (silencieux, visuel seulement)

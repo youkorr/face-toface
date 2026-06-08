@@ -150,6 +150,10 @@ async def to_code(config):
         )
         cg.add_define("FACE2FACE_USE_AEC")
 
+    # Ringtone: the embedded ring.aac is decoded to PCM at runtime. Pull
+    # Espressif's audio codec lib for the standalone AAC decoder (esp_aac_dec).
+    esp32.add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
+
     cam = await cg.get_variable(config[CONF_CAMERA_ID])
     cg.add(var.set_camera(cam))
     if CONF_MICROPHONE_ID in config:

@@ -209,9 +209,11 @@ class Face2Face : public Component {
   void on_mic_data_(const std::vector<uint8_t> &data);
   void play_audio_(const uint8_t *pcm, uint32_t len);
 
-  // Synthesised ringtone (no audio file): plays on the speaker while OUTGOING
-  // (caller's "calling" beep) or RINGING (callee's incoming-call ring).
+  // Ringtone: the embedded ring.aac (AAC) is decoded to PCM once (esp_aac_dec)
+  // and looped on the speaker while OUTGOING (caller) or RINGING (callee).
+  // Falls back to a synthesised beep if decoding is unavailable.
   void pump_ringtone_();
+  bool decode_ringtone_();  // AAC -> cached PCM (lazy, runs once)
 
   // acoustic echo cancellation (ESP-SR esp_aec)
   bool aec_init_();
@@ -311,9 +313,14 @@ class Face2Face : public Component {
   size_t ref_head_{0};
   size_t ref_count_{0};
   uint32_t last_spk_ms_{0};  // last time the speaker played (AEC gating)
-  uint32_t ring_phase_{0};       // sample counter for tone synthesis
+  uint32_t ring_phase_{0};       // sample counter for tone synthesis (fallback beep)
   uint32_t last_ring_ms_{0};     // pacing for ringtone chunks
   bool ring_spk_started_{false}; // did we start the speaker for the ringtone?
+  // Decoded ring.aac PCM (mono int16), looped during the ringing phase.
+  std::vector<int16_t> ring_pcm_;
+  uint32_t ring_pcm_rate_{0};    // sample rate reported by the AAC decoder
+  size_t ring_pcm_pos_{0};       // playback cursor into ring_pcm_
+  bool ring_decoded_{false};     // decode attempted (success or give-up)
 
   // hardware JPEG handles + DMA buffers
   void *jpeg_enc_{nullptr};
