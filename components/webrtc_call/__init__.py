@@ -33,12 +33,16 @@ CONF_TURN_URL = "turn_url"
 CONF_TURN_USER = "turn_username"
 CONF_TURN_PASSWORD = "turn_password"
 CONF_AUTO_CONNECT = "auto_connect"
+CONF_RINGTONE = "ringtone"
+CONF_DURATION = "duration"
 
 webrtc_call_ns = cg.esphome_ns.namespace("webrtc_call")
 WebrtcCall = webrtc_call_ns.class_("WebrtcCall", cg.Component)
 
 StartCallAction = webrtc_call_ns.class_("StartCallAction", automation.Action)
 HangupAction = webrtc_call_ns.class_("HangupAction", automation.Action)
+RingAction = webrtc_call_ns.class_("RingAction", automation.Action)
+StopRingAction = webrtc_call_ns.class_("StopRingAction", automation.Action)
 
 # esp-webrtc-solution: the components live as paths inside the repo.
 WEBRTC_REPO = "https://github.com/espressif/esp-webrtc-solution"
@@ -71,6 +75,9 @@ CONFIG_SCHEMA = cv.Schema(
         # If true, connect the peer as soon as the room is joined (else manual
         # via the start_call action).
         cv.Optional(CONF_AUTO_CONNECT, default=False): cv.boolean,
+        # Play the embedded ring.aac (AAC, decoded by av_render) as ringback when
+        # a call starts; auto-stopped on connect/hangup. Set false to silence it.
+        cv.Optional(CONF_RINGTONE, default=True): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -87,6 +94,7 @@ async def to_code(config):
     cg.add(var.set_resolution(config[CONF_WIDTH], config[CONF_HEIGHT]))
     cg.add(var.set_framerate(config[CONF_FRAMERATE]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
+    cg.add(var.set_ringtone(config[CONF_RINGTONE]))
     if CONF_STUN_SERVER in config:
         cg.add(var.set_stun_server(config[CONF_STUN_SERVER]))
     if CONF_TURN_URL in config:
@@ -125,5 +133,30 @@ async def start_call_to_code(config, action_id, template_arg, args):
 
 @automation.register_action("webrtc_call.hangup", HangupAction, ACTION_SCHEMA, synchronous=True)
 async def hangup_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+# Ring action: optional `duration` (ms). Omitted -> loop until stop_ring/connect.
+RING_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(WebrtcCall),
+        cv.Optional(CONF_DURATION): cv.templatable(cv.int_),
+    }
+)
+
+
+@automation.register_action("webrtc_call.ring", RingAction, RING_SCHEMA)
+async def ring_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    if CONF_DURATION in config:
+        templ = await cg.templatable(config[CONF_DURATION], args, int)
+        cg.add(var.set_duration(templ))
+    return var
+
+
+@automation.register_action("webrtc_call.stop_ring", StopRingAction, ACTION_SCHEMA, synchronous=True)
+async def stop_ring_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)

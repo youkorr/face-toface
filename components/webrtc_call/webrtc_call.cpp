@@ -1,5 +1,6 @@
 #include "webrtc_call.h"
 #include "esphome/core/log.h"
+#include "ring_aac.h"
 
 #ifdef WEBRTC_CALL_ENABLED
 // Espressif esp-webrtc-solution headers (pulled in __init__.py).
@@ -18,6 +19,9 @@
 #include "esp_video_enc_default.h"
 #include "esp_video_dec_default.h"
 #include "esp_audio_dec_default.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #endif
 
 namespace esphome {
@@ -56,6 +60,8 @@ void WebrtcCall::dump_config() {
   ESP_LOGCONFIG(TAG, "  Video: %ux%u @ %u fps (MJPEG)", width_, height_, framerate_);
   ESP_LOGCONFIG(TAG, "  STUN: %s", stun_server_.empty() ? "(none)" : stun_server_.c_str());
   ESP_LOGCONFIG(TAG, "  TURN: %s", turn_url_.empty() ? "(none)" : turn_url_.c_str());
+  ESP_LOGCONFIG(TAG, "  Ringtone: %s (embedded ring.aac, %u bytes)",
+                ringtone_enabled_ ? "on" : "off", RING_AAC_LEN);
 }
 
 // ===========================================================================
@@ -219,6 +225,9 @@ bool WebrtcCall::webrtc_init_() {
         switch (event->type) {
           case ESP_WEBRTC_EVENT_CONNECTED:
             self->connected_ = true;
+            // Peer audio now owns the player; silence the ringback. Signal the
+            // ringtone task to stop (non-blocking; it tears down its AAC stream).
+            self->ring_stopping_ = self->ring_playing_;
             ESP_LOGI(TAG, "WebRTC connected");
             break;
           case ESP_WEBRTC_EVENT_DISCONNECTED:
@@ -255,6 +264,10 @@ void WebrtcCall::start_call() {
     return;
   ESP_LOGI(TAG, "start_call: enabling peer connection");
   esp_webrtc_enable_peer_connection(static_cast<esp_webrtc_handle_t>(webrtc_), true);
+  // Ringback: loop ring.aac until the peer connects (stopped in the CONNECTED
+  // event) or the call is hung up.
+  if (ringtone_enabled_)
+    play_ringtone(-1);
 #endif
 }
 
@@ -263,8 +276,118 @@ void WebrtcCall::hangup() {
   if (webrtc_ == nullptr)
     return;
   ESP_LOGI(TAG, "hangup: disabling peer connection");
+  stop_ringtone();
   esp_webrtc_enable_peer_connection(static_cast<esp_webrtc_handle_t>(webrtc_), false);
   connected_ = false;
+#endif
+}
+
+// ===========================================================================
+// Ringtone: decode the embedded ring.aac (AAC) through av_render.
+// Ported from doorbell_demo media_sys.c (music_play_thread / play_music).
+// ===========================================================================
+void WebrtcCall::ringtone_thread_(void *arg) {
+#ifdef WEBRTC_CALL_ENABLED
+  auto *self = static_cast<WebrtcCall *>(arg);
+  auto player = static_cast<av_render_handle_t>(self->player_);
+
+  // Tell av_render the upcoming raw stream is AAC.
+  av_render_audio_info_t info = {};
+  info.codec = AV_RENDER_AUDIO_CODEC_AAC;
+  av_render_add_audio_stream(player, &info);
+
+  const uint8_t *music = RING_AAC;
+  const int music_size = static_cast<int>(RING_AAC_LEN);
+  // duration: <0 -> loop until stop_ringtone(); 0 -> play one loop; >0 -> ms.
+  int duration = self->ring_duration_;
+  const bool forever = duration < 0;
+  int pos = 0;
+
+  while (!self->ring_stopping_) {
+    uint32_t start_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+    // Feed one ADTS frame at a time (frame size from the ADTS header).
+    int send_size = music_size - pos;
+    const uint8_t *adts = music + pos;
+    if (adts[0] != 0xFF) {
+      send_size = 0;  // not an ADTS sync word -> end/garbage, restart loop
+    } else {
+      int frame_size = ((adts[3] & 0x03) << 11) | (adts[4] << 3) | (adts[5] >> 5);
+      if (frame_size < send_size)
+        send_size = frame_size;
+    }
+    if (send_size > 0) {
+      av_render_audio_data_t adata = {};
+      adata.data = const_cast<uint8_t *>(adts);
+      adata.size = static_cast<uint32_t>(send_size);
+      if (av_render_add_audio_data(player, &adata) != 0)
+        break;
+      pos += send_size;
+    }
+
+    if (pos >= music_size || send_size == 0) {
+      pos = 0;  // end of clip -> rewind for the next loop
+      if (!forever && duration == 0) {
+        // "play once" (or timed run elapsed): wait for the render FIFO to
+        // drain, then stop.
+        av_render_fifo_stat_t stat = {};
+        while (!self->ring_stopping_) {
+          av_render_get_audio_fifo_level(player, &stat);
+          if (stat.data_size > 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+          }
+          break;
+        }
+        break;
+      }
+      // forever or timed-but-not-yet-elapsed: loop again from the start.
+    }
+
+    uint32_t end_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (!forever && duration > 0) {
+      duration -= static_cast<int>(end_ms - start_ms);
+      if (duration < 0)
+        duration = 0;  // elapsed -> drain & stop at the next clip boundary
+    }
+  }
+
+  av_render_reset(player);
+  self->ring_stopping_ = false;
+  self->ring_playing_ = false;
+  vTaskDelete(nullptr);
+#endif
+}
+
+void WebrtcCall::play_ringtone(int duration_ms) {
+#ifdef WEBRTC_CALL_ENABLED
+  if (player_ == nullptr) {
+    ESP_LOGW(TAG, "play_ringtone: player not ready");
+    return;
+  }
+  if (ring_playing_) {
+    ESP_LOGD(TAG, "ringtone already playing, restarting");
+    stop_ringtone();
+  }
+  ring_playing_ = true;
+  ring_stopping_ = false;
+  ring_duration_ = duration_ms;
+  // Decoding AAC needs a roomy stack; run off the main loop.
+  if (xTaskCreate(&WebrtcCall::ringtone_thread_, "ringtone", 6144, this, 5, nullptr) != pdPASS) {
+    ESP_LOGE(TAG, "failed to start ringtone task");
+    ring_playing_ = false;
+  }
+#endif
+}
+
+void WebrtcCall::stop_ringtone() {
+#ifdef WEBRTC_CALL_ENABLED
+  if (!ring_playing_)
+    return;
+  ring_stopping_ = true;
+  // Wait (bounded) for the task to acknowledge and tear down its AAC stream.
+  for (int i = 0; i < 100 && ring_stopping_; i++)
+    vTaskDelay(pdMS_TO_TICKS(20));
 #endif
 }
 

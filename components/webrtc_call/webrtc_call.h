@@ -27,6 +27,7 @@ class WebrtcCall : public Component {
   void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
   void set_framerate(uint8_t f) { framerate_ = f; }
   void set_auto_connect(bool a) { auto_connect_ = a; }
+  void set_ringtone(bool e) { ringtone_enabled_ = e; }
   void set_stun_server(const std::string &s) { stun_server_ = s; }
   void set_turn(const std::string &url, const std::string &user, const std::string &pass) {
     turn_url_ = url; turn_user_ = user; turn_pass_ = pass;
@@ -36,11 +37,17 @@ class WebrtcCall : public Component {
   void start_call();  // enable the peer connection (join + connect)
   void hangup();      // disable the peer connection
 
+  // ---- Ringtone (embedded ring.aac, decoded by av_render) ----
+  // duration: ms to loop; 0 = play one loop; <0 = loop until stop_ringtone().
+  void play_ringtone(int duration_ms = -1);
+  void stop_ringtone();
+
   bool is_connected() const { return connected_; }
 
  protected:
   bool media_init_();   // GMF capture + render (ported from media_sys.c)
   bool webrtc_init_();  // esp_webrtc_open + signaling + media provider + start
+  static void ringtone_thread_(void *arg);  // AAC feed loop (port of music_play_thread)
 
   // config
   std::string signaling_url_;
@@ -50,6 +57,7 @@ class WebrtcCall : public Component {
   uint16_t width_{320}, height_{240};
   uint8_t framerate_{15};
   bool auto_connect_{false};
+  bool ringtone_enabled_{true};  // play embedded ring.aac as ringback
   std::string stun_server_, turn_url_, turn_user_, turn_pass_;
 
   // esp-webrtc handles (opaque; kept as void* to keep the header light)
@@ -59,6 +67,11 @@ class WebrtcCall : public Component {
   bool media_ready_{false};
   bool started_{false};
   volatile bool connected_{false};
+
+  // ringtone playback state (port of doorbell_demo media_sys.c music_*)
+  volatile bool ring_playing_{false};
+  volatile bool ring_stopping_{false};
+  int ring_duration_{-1};
 };
 
 // ---- Actions ----
@@ -74,6 +87,28 @@ template<typename... Ts> class HangupAction : public Action<Ts...> {
  public:
   explicit HangupAction(WebrtcCall *parent) : parent_(parent) {}
   void play(Ts... x) override { this->parent_->hangup(); }
+ protected:
+  WebrtcCall *parent_;
+};
+
+template<typename... Ts> class RingAction : public Action<Ts...> {
+ public:
+  explicit RingAction(WebrtcCall *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(int, duration)
+  void play(Ts... x) override {
+    int d = -1;  // default: loop until stop_ringtone()
+    if (this->duration_.has_value())
+      d = this->duration_.value(x...);
+    this->parent_->play_ringtone(d);
+  }
+ protected:
+  WebrtcCall *parent_;
+};
+
+template<typename... Ts> class StopRingAction : public Action<Ts...> {
+ public:
+  explicit StopRingAction(WebrtcCall *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->stop_ringtone(); }
  protected:
   WebrtcCall *parent_;
 };
