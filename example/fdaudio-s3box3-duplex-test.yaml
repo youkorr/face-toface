@@ -1,0 +1,149 @@
+# =============================================================================
+# TEST FULL-DUPLEX — fdaudio sur ESP32-S3-BOX-3 (ES8311 + ES7210)
+# -----------------------------------------------------------------------------
+# BUT : valider le DUPLEX de NOTRE composant `fdaudio` (micro + HP en même
+# temps, écho annulé par l'AFE esp-sr) sur le S3-Box-3, qui est la carte de
+# référence d'esp-sr. AUCUN rapport avec WebRTC (WebRTC = firmware P4 séparé).
+#
+# Test : lancez l'assistant ; PENDANT qu'il parle (TTS), dites le mot d'éveil.
+#   - il vous entend pendant qu'il parle           -> FULL-DUPLEX OK ✅
+#   - il ne vous entend que quand le HP se tait     -> AEC/duplex à ajuster
+#
+# Pins/codecs = définition codec_board "ESP32_S3_BOX_3" :
+#   i2c  sda=8  scl=18      ES8311 @0x18 (HP)   ES7210 @0x40 (micros)
+#   i2s  mclk=2 bclk=17 ws=45 din=16 dout=15    PA (ampli HP) = GPIO46
+# =============================================================================
+
+substitutions:
+  name: s3box3-fdtest
+
+esphome:
+  name: ${name}
+  # 2 piles ML (esp-dl + esp-sr) : compilation lourde. 1 process évite l'OOM
+  # "cc1plus: fatal error: Killed". Montez à 2 si la machine a assez de RAM.
+  compile_process_limit: 1
+  on_boot:
+    priority: 600
+    # Le S3-Box-3 coupe l'ampli HP au reset : il faut tirer PA_CTRL (GPIO46)
+    # haut, sinon AUCUN son ne sort (le codec joue mais l'ampli est muet).
+    then:
+      - output.turn_on: pa_ctrl
+
+esp32:
+  # S3-Box-3 = ESP32-S3 N16R8 (16 MB flash, 8 MB PSRAM octal).
+  variant: esp32s3
+  flash_size: 16MB
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # L'audio temps-réel peut bloquer la loopTask au boot -> task_wdt.
+      CONFIG_ESP_TASK_WDT_EN: "n"
+      # PSRAM octal 80 MHz (N16R8).
+      CONFIG_SPIRAM_MODE_OCT: "y"
+      CONFIG_SPIRAM_SPEED_80M: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  # Le S3 a le WiFi natif : pas besoin d'esp32_hosted (contrairement au P4).
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Notre composant fdaudio (+ face2face) depuis ce dépôt/branche.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio]
+    refresh: always
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO8
+    scl: GPIO18
+    frequency: 400kHz
+
+# Ampli HP du Box-3 (PA_CTRL). Activé au boot (voir on_boot ci-dessus).
+output:
+  - platform: gpio
+    pin: GPIO46
+    id: pa_ctrl
+
+# --- Moteur audio full-duplex (un seul driver I2S, codecs Espressif) ---
+fdaudio:
+  id: audio_engine
+  # pins I2S du S3-Box-3
+  mclk_pin: GPIO2
+  bclk_pin: GPIO17
+  lrclk_pin: GPIO45
+  din_pin: GPIO16
+  dout_pin: GPIO15
+  i2c_port: 0
+  output_codec: es8311        # HP du Box-3
+  output_address: 0x18
+  mic_address: 0x40           # ES7210 (micros)
+  mic_gain_db: 37.5
+  output_volume: 70
+  sample_rate: 16000          # exposé à ESPHome / voice_assistant
+  codec_sample_rate: 48000    # horloge I2S/codec réelle, décimée vers 16k
+  # mic_channels : ES7210 MIC1=1 MIC2=2 ... Si le micro est quasi muet, essayez
+  # 2, 4, ou 3 (MIC1+MIC2) selon le câblage du Box-3.
+  mic_channels: 1
+  enable_aec: true
+  # AFE complète (AEC + NS + AGC, référence alignée) = le VRAI test de duplex.
+  # C'est le moteur esp-sr pensé pour ce Box. Si la compilation/PSRAM coince,
+  # repassez à false (chemin AEC simple) pour isoler le souci.
+  use_afe: true
+
+# --- micro + HP exposés à ESPHome ---
+microphone:
+  - platform: fdaudio
+    id: box_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: box_speaker
+    fdaudio_id: audio_engine
+
+media_player:
+  - platform: speaker
+    name: "Box3 FD Media"
+    id: test_media_player
+    announcement_pipeline:
+      speaker: box_speaker
+      format: FLAC
+      sample_rate: 16000
+      num_channels: 1
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: okay_nabu
+
+voice_assistant:
+  id: va
+  microphone: box_microphone
+  media_player: test_media_player
+  micro_wake_word: mww
+  # On NE coupe PAS le micro pendant la réponse : on VEUT tester le full-duplex.
+  on_tts_start:
+    - logger.log: "TTS en cours — DITES LE MOT D'EVEIL MAINTENANT (test duplex)"
+
+# Bouton pour forcer une phrase (TTS) et tester pendant qu'il parle.
+button:
+  - platform: template
+    name: "FD: dire une phrase"
+    on_press:
+      - voice_assistant.start:
