@@ -25,6 +25,7 @@ DEPENDENCIES = ["esp32", "network"]
 
 CONF_SIGNALING_URL = "signaling_url"
 CONF_ROOM = "room"
+CONF_BOARD_TYPE = "board_type"
 CONF_FRAMERATE = "framerate"
 CONF_STUN_SERVER = "stun_server"
 CONF_TURN_URL = "turn_url"
@@ -49,6 +50,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_SIGNALING_URL): cv.string,
         # Room id: both boards joining the same room get connected.
         cv.Optional(CONF_ROOM, default="esp_room"): cv.string,
+        # codec_board definition name (sets the I2S codec + LCD + camera pins).
+        # Must match a board registered in the codec_board component for YOUR
+        # hardware (Waveshare/Tab5 -> custom definition needed).
+        cv.Optional(CONF_BOARD_TYPE, default="ESP32_P4_DEV"): cv.string,
         cv.Optional(CONF_WIDTH, default=320): cv.int_range(min=160, max=1280),
         cv.Optional(CONF_HEIGHT, default=240): cv.int_range(min=120, max=720),
         cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
@@ -71,6 +76,7 @@ async def to_code(config):
 
     cg.add(var.set_signaling_url(config[CONF_SIGNALING_URL]))
     cg.add(var.set_room(config[CONF_ROOM]))
+    cg.add(var.set_board_type(config[CONF_BOARD_TYPE]))
     cg.add(var.set_resolution(config[CONF_WIDTH], config[CONF_HEIGHT]))
     cg.add(var.set_framerate(config[CONF_FRAMERATE]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
@@ -90,6 +96,7 @@ async def to_code(config):
         ("media_lib_sal", "components/media_lib_sal"),
         ("esp_capture", "components/esp_capture"),
         ("av_render", "components/av_render"),
+        ("codec_board", "components/codec_board"),
         ("esp_peer", "components/esp_peer"),
         ("esp_webrtc", "components/esp_webrtc"),
         ("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal"),
