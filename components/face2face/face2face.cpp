@@ -188,6 +188,52 @@ void Face2Face::call() {
     on_outgoing_->trigger();
 }
 
+// Resolve "host" (already-numeric IP or a DNS/DDNS hostname) to a numeric IPv4
+// string. Returns "" on failure so the caller can keep the previous peer.
+std::string Face2Face::resolve_host_(const std::string &host) {
+  if (host.empty())
+    return "";
+  // Already a dotted-quad IP? inet_aton accepts it directly, no DNS needed.
+  struct in_addr probe {};
+  if (::inet_aton(host.c_str(), &probe) != 0)
+    return host;
+  // Hostname (e.g. DuckDNS) -> resolve via DNS each call so a changed home IP
+  // is picked up.
+  struct addrinfo hints {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  struct addrinfo *res = nullptr;
+  if (::getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
+    ESP_LOGW(TAG, "DNS resolve failed for '%s'", host.c_str());
+    return "";
+  }
+  char ip[INET_ADDRSTRLEN] = {};
+  auto *sa = reinterpret_cast<struct sockaddr_in *>(res->ai_addr);
+  ::inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+  ::freeaddrinfo(res);
+  ESP_LOGI(TAG, "resolved '%s' -> %s", host.c_str(), ip);
+  return std::string(ip);
+}
+
+bool Face2Face::call_contact(const std::string &name) {
+  for (const auto &c : contacts_) {
+    if (c.name != name)
+      continue;
+    std::string ip = resolve_host_(c.host);
+    if (ip.empty()) {
+      ESP_LOGW(TAG, "call_contact('%s'): could not resolve host '%s'",
+               name.c_str(), c.host.c_str());
+      return false;
+    }
+    set_peer_ip(ip);
+    ESP_LOGI(TAG, "call_contact('%s') -> %s (%s)", name.c_str(), c.host.c_str(), ip.c_str());
+    call();
+    return true;
+  }
+  ESP_LOGW(TAG, "call_contact: unknown contact '%s'", name.c_str());
+  return false;
+}
+
 void Face2Face::answer() {
   if (state_ != STATE_RINGING) {
     ESP_LOGW(TAG, "answer() ignored: not ringing");

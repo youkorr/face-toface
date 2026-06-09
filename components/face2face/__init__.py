@@ -17,12 +17,15 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import esp32, microphone, speaker, switch
-from esphome.const import CONF_ID, CONF_TRIGGER_ID
+from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_NAME
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32", "network"]
 
 CONF_PEER_IP = "peer_ip"
+CONF_CONTACTS = "contacts"
+CONF_HOST = "host"
+CONF_CONTACT = "contact"
 CONF_VIDEO_PORT = "video_port"
 CONF_AUDIO_PORT = "audio_port"
 CONF_CAMERA_ID = "camera_id"
@@ -82,6 +85,18 @@ CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(Face2Face),
         cv.Optional(CONF_PEER_IP, default="0.0.0.0"): cv.ipv4address,
+        # Address book for direct IP-to-IP calls. Each contact's host is a public
+        # IP (the peer's router, with UDP video_port+audio_port forwarded to its
+        # board) or a DNS/DDNS hostname (recommended: home IPs change). Dialled
+        # by name via `face2face.call: { contact: "<name>" }`.
+        cv.Optional(CONF_CONTACTS): cv.ensure_list(
+            cv.Schema(
+                {
+                    cv.Required(CONF_NAME): cv.string_strict,
+                    cv.Required(CONF_HOST): cv.string_strict,  # IP or hostname
+                }
+            )
+        ),
         cv.Required(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
         cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
@@ -154,6 +169,9 @@ async def to_code(config):
     # Espressif's audio codec lib for the standalone AAC decoder (esp_aac_dec).
     esp32.add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
 
+    for contact in config.get(CONF_CONTACTS, []):
+        cg.add(var.add_contact(contact[CONF_NAME], contact[CONF_HOST]))
+
     cam = await cg.get_variable(config[CONF_CAMERA_ID])
     cg.add(var.set_camera(cam))
     if CONF_MICROPHONE_ID in config:
@@ -190,10 +208,24 @@ async def to_code(config):
 F2F_ACTION_SCHEMA = automation.maybe_simple_id({cv.GenerateID(): cv.use_id(Face2Face)})
 
 
-@automation.register_action("face2face.call", CallAction, F2F_ACTION_SCHEMA, synchronous=True)
+# `face2face.call` accepts an optional `contact:` name (templatable). Without it,
+# it dials the current peer_ip (backward compatible).
+F2F_CALL_SCHEMA = automation.maybe_simple_id(
+    {
+        cv.GenerateID(): cv.use_id(Face2Face),
+        cv.Optional(CONF_CONTACT): cv.templatable(cv.string),
+    }
+)
+
+
+@automation.register_action("face2face.call", CallAction, F2F_CALL_SCHEMA, synchronous=True)
 async def f2f_call_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, parent)
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    if CONF_CONTACT in config:
+        templ = await cg.templatable(config[CONF_CONTACT], args, cg.std_string)
+        cg.add(var.set_contact(templ))
+    return var
 
 
 @automation.register_action("face2face.answer", AnswerAction, F2F_ACTION_SCHEMA, synchronous=True)

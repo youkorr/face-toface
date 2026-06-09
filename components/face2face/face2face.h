@@ -106,6 +106,15 @@ class Face2Face : public Component {
       peer_ip_ = ip;
   }
   std::string get_peer_ip() const { return peer_ip_; }
+  // ---- Address book (name -> host) for direct IP-to-IP calls --------------
+  // host is a public IP (port-forwarded) or a DNS/DDNS hostname, resolved at
+  // call time so a changing home IP behind a DuckDNS name still works.
+  void add_contact(const std::string &name, const std::string &host) {
+    contacts_.push_back(Contact{name, host});
+  }
+  // Resolve a contact's host, set it as the peer, and dial. Returns false if
+  // the name is unknown or the host can't be resolved (peer left unchanged).
+  bool call_contact(const std::string &name);
   void set_video_port(uint16_t p) { video_port_ = p; }
   void set_audio_port(uint16_t p) { audio_port_ = p; }
   void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
@@ -220,9 +229,17 @@ class Face2Face : public Component {
   void aec_deinit_();
   void ref_push_(const int16_t *d, size_t n);  // store far-end (speaker) samples
   void ref_pop_(int16_t *d, size_t n);         // fetch time-aligned reference
+  // Resolve an IP-or-hostname to a numeric IPv4 string ("" on failure).
+  std::string resolve_host_(const std::string &host);
 
   // config
   std::string peer_ip_;
+  // Address book: name -> host (IP or DNS/DDNS), resolved when dialled.
+  struct Contact {
+    std::string name;
+    std::string host;
+  };
+  std::vector<Contact> contacts_;
   uint16_t video_port_{9000};
   uint16_t audio_port_{9001};
   uint16_t width_{640};
@@ -339,7 +356,13 @@ class Face2Face : public Component {
 template<typename... Ts> class CallAction : public Action<Ts...> {
  public:
   explicit CallAction(Face2Face *parent) : parent_(parent) {}
-  void play(const Ts &...x) override { ((void) x, ...); this->parent_->call(); }
+  TEMPLATABLE_VALUE(std::string, contact)  // optional: dial a named contact
+  void play(const Ts &...x) override {
+    if (this->contact_.has_value())
+      this->parent_->call_contact(this->contact_.value(x...));
+    else
+      this->parent_->call();
+  }
  protected:
   Face2Face *parent_;
 };

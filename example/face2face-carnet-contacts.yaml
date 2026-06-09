@@ -1,0 +1,128 @@
+# =============================================================================
+# CARNET DE CONTACTS — face2face direct IP-à-IP (LAN ou par INTERNET)
+# -----------------------------------------------------------------------------
+# Chaque carte ESP32-P4 qui a ce dépôt peut appeler une autre carte directement,
+# par son IP (ou son nom DDNS). Aucun serveur, aucun WebRTC : c'est l'UDP
+# point-à-point de face2face, avec un carnet d'adresses nommé.
+#
+#   face2face.call: { contact: "Mamie" }   ->  résout l'hôte + appelle
+#
+# -----------------------------------------------------------------------------
+# POUR APPELER À TRAVERS INTERNET (hors du domicile), 2 choses par maison :
+#
+# 1) REDIRECTION DE PORT (port forwarding) sur la box/routeur :
+#       UDP 9000  ->  IP locale de l'ESP32-P4   (vidéo + signalisation)
+#       UDP 9001  ->  IP locale de l'ESP32-P4   (audio)
+#    Sans ça, les appels entrants depuis internet sont bloqués par le NAT.
+#    (Pense à fixer l'IP locale de la carte : bail DHCP statique sur la box.)
+#
+# 2) DNS DYNAMIQUE (DDNS) — recommandé, car l'IP publique d'une box change :
+#    crée un nom gratuit (DuckDNS, No-IP...) qui suit ton IP, et mets ce NOM
+#    dans le carnet de l'AMI (pas une IP en dur qui sera fausse demain).
+#
+#    En LAN pur (même maison/réseau), pas besoin de tout ça : mets l'IP locale.
+#
+# ⚠️ Si ta box est en CGNAT (souvent 4G/5G, Starlink, certaines fibres), tu ne
+#    peux pas rediriger de port -> le direct ne marchera pas pour toi (il
+#    faudrait un relais). Vérifie : ton IP WAN box == ton IP publique vue sur
+#    https://ifconfig.me ? si différentes = CGNAT.
+# =============================================================================
+
+# --- Audio full-duplex (fdaudio) : inchangé, voir fdaudio-waveshare.yaml ------
+# (repris ici en minimal pour que l'exemple soit complet)
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio, face2face]
+    refresh: always
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 400kHz
+
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  sample_rate: 16000
+  enable_aec: true
+
+microphone:
+  - platform: fdaudio
+    id: esp32_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: esp32_speaker
+    fdaudio_id: audio_engine
+
+# --- face2face : appel vidéo + audio, AVEC carnet d'adresses ------------------
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  enable_audio: true
+  enable_aec: false           # l'AEC est faite par fdaudio
+  video_port: 9000            # <- à rediriger en UDP sur la box
+  audio_port: 9001            # <- à rediriger en UDP sur la box
+
+  # Le carnet d'adresses. host = IP publique de l'ami (port-forwardée) ou,
+  # mieux, son nom DDNS. En LAN pur, mets l'IP locale (192.168.x.x).
+  contacts:
+    - name: "Mamie"
+      host: mamie-intercom.duckdns.org     # DDNS (recommandé pour internet)
+    - name: "Paul"
+      host: 81.240.12.34                   # IP publique fixe (port-forwardée)
+    - name: "Salon"
+      host: 192.168.1.50                   # carte sur le même LAN (local pur)
+
+# --- Boutons d'appel : un par contact ----------------------------------------
+button:
+  - platform: template
+    name: "Appeler Mamie"
+    on_press:
+      - face2face.call:
+          contact: "Mamie"
+  - platform: template
+    name: "Appeler Paul"
+    on_press:
+      - face2face.call:
+          contact: "Paul"
+  - platform: template
+    name: "Répondre"
+    on_press:
+      - face2face.answer:
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - face2face.hangup:
+
+# --- Variante : un seul menu déroulant Home Assistant pour choisir qui appeler
+# (au lieu d'un bouton par contact). Décommente si tu préfères.
+#
+# select:
+#   - platform: template
+#     name: "Contact à appeler"
+#     id: contact_pick
+#     optimistic: true
+#     options: ["Mamie", "Paul", "Salon"]
+#     initial_option: "Mamie"
+#
+# button:
+#   - platform: template
+#     name: "Appeler le contact choisi"
+#     on_press:
+#       - face2face.call:
+#           contact: !lambda 'return id(contact_pick).state;'
