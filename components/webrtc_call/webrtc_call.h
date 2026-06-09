@@ -13,9 +13,15 @@
 #include "esphome/core/automation.h"
 
 #include <string>
+#include <vector>
 #include <cstdint>
 
 namespace esphome {
+// Forward declarations so we can hold ESPHome mic/speaker without pulling their
+// headers here (kept like face2face does).
+namespace microphone { class Microphone; }
+namespace speaker { class Speaker; }
+
 namespace webrtc_call {
 
 class WebrtcCall : public Component {
@@ -34,6 +40,13 @@ class WebrtcCall : public Component {
   void set_framerate(uint8_t f) { framerate_ = f; }
   void set_video(bool v) { video_ = v; }
   void set_aec(bool a) { aec_ = a; }
+  // Audio bridge: share fdaudio's mic/speaker (via the ESPHome microphone +
+  // speaker platforms) instead of grabbing the codec ourselves. When BOTH are
+  // set, webrtc runs "bridged": it does NOT init the audio codec (fdaudio owns
+  // it), so this firmware can keep fdaudio + voice_assistant alongside webrtc.
+  void set_microphone(microphone::Microphone *m) { mic_ = m; }
+  void set_speaker(speaker::Speaker *s) { spk_ = s; }
+  void set_audio_sample_rate(uint32_t r) { bridge_rate_ = r; }
   void set_auto_connect(bool a) { auto_connect_ = a; }
   void set_ringtone(bool e) { ringtone_enabled_ = e; }
   void set_stun_server(const std::string &s) { stun_server_ = s; }
@@ -57,6 +70,15 @@ class WebrtcCall : public Component {
   bool webrtc_init_();  // esp_webrtc_open + signaling + media provider + start
   static void ringtone_thread_(void *arg);  // AAC feed loop (port of music_play_thread)
 
+  // ---- fdaudio audio bridge (bridged_ mode) ----
+  // Mic: ESPHome microphone callback pushes PCM into mic_rb_; our custom
+  // esp_capture audio source drains it (so we share the mic with VA, no steal).
+  // Speaker: our custom av_render audio render writes decoded PCM to spk_->play.
+  bool bridge_audio_init_();             // build the custom capture src + render
+  void on_mic_data_(const std::vector<uint8_t> &data);  // mic cb -> ring buffer
+  void *make_bridge_capture_src_();      // esp_capture_audio_src_if_t* (fed by mic)
+  void *make_bridge_audio_render_();     // audio_render_handle_t -> spk_->play
+
   // config
   std::string signaling_url_;
   std::string room_{"esp_room"};
@@ -78,6 +100,15 @@ class WebrtcCall : public Component {
   bool has_video_{false};        // resolved at runtime (camera + LCD present)
   bool started_{false};
   volatile bool connected_{false};
+
+  // fdaudio audio bridge
+  microphone::Microphone *mic_{nullptr};
+  speaker::Speaker *spk_{nullptr};
+  bool bridged_{false};          // true when mic_ + spk_ are set (skip codec init)
+  uint32_t bridge_rate_{16000};  // PCM rate of the ESPHome mic/speaker (mono 16-bit)
+  void *mic_rb_{nullptr};        // RingbufHandle_t: mic PCM, cb -> capture src
+  bool mic_subscribed_{false};
+  bool mic_started_{false};      // did we start the mic (so we stop it on hangup)
 
   // ringtone playback state (port of doorbell_demo media_sys.c music_*)
   volatile bool ring_playing_{false};

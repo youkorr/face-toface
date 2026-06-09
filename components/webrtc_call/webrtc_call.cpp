@@ -16,10 +16,15 @@
 #include "esp_capture_sink.h"
 #include "esp_audio_enc_default.h"
 #include "esp_audio_dec_default.h"
+#include "audio_render.h"          // custom audio_render (callback) -> ESPHome speaker
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include "sdkconfig.h"
+// ESPHome mic/speaker, for the fdaudio audio bridge (shared with voice_assistant).
+#include "esphome/components/microphone/microphone.h"
+#include "esphome/components/speaker/speaker.h"
 #if CONFIG_IDF_TARGET_ESP32P4
 // CSI camera + HW video codecs are P4-only in this stack.
 #include "esp_video_init.h"
@@ -66,7 +71,10 @@ void WebrtcCall::dump_config() {
     ESP_LOGCONFIG(TAG, "  Video: %ux%u @ %u fps (MJPEG), two-way", width_, height_, framerate_);
   else
     ESP_LOGCONFIG(TAG, "  Video: disabled (audio-only call)");
-  ESP_LOGCONFIG(TAG, "  Audio: G.711A, full-duplex, AEC %s", aec_ ? "on" : "off");
+  if (bridged_)
+    ESP_LOGCONFIG(TAG, "  Audio: G.711A, full-duplex, via fdaudio bridge (mic+speaker shared)");
+  else
+    ESP_LOGCONFIG(TAG, "  Audio: G.711A, full-duplex, AEC %s", aec_ ? "on" : "off");
   ESP_LOGCONFIG(TAG, "  STUN: %s", stun_server_.empty() ? "(none)" : stun_server_.c_str());
   ESP_LOGCONFIG(TAG, "  TURN: %s", turn_url_.empty() ? "(none)" : turn_url_.c_str());
   ESP_LOGCONFIG(TAG, "  Ringtone: %s (embedded ring.aac, %u bytes)",
@@ -95,10 +103,17 @@ bool WebrtcCall::media_init_() {
     ESP_LOGI(TAG, "codec_board: parsed inline board_config (%u bytes)",
              static_cast<unsigned>(board_config_.size()));
   }
+  // Bridged mode: fdaudio (via the ESPHome mic/speaker) owns the I2S codec, so
+  // we must NOT init it here. We still use codec_board for the camera/LCD pins.
+  bridged_ = (mic_ != nullptr && spk_ != nullptr);
   set_codec_board_type(board_type_.c_str());
-  codec_init_cfg_t ccfg = {};
-  ccfg.reuse_dev = false;  // record + playback at the same time (full-duplex)
-  init_codec(&ccfg);
+  if (!bridged_) {
+    codec_init_cfg_t ccfg = {};
+    ccfg.reuse_dev = false;  // record + playback at the same time (full-duplex)
+    init_codec(&ccfg);
+  } else {
+    ESP_LOGI(TAG, "audio bridge: codec owned by fdaudio (mic/speaker shared with voice_assistant)");
+  }
   board_lcd_init();
 
   // ---- Register default codecs (media_sys_buildup) ----
@@ -138,11 +153,15 @@ bool WebrtcCall::media_init_() {
   if (video_ && vsrc == nullptr)
     ESP_LOGW(TAG, "video requested but no camera on this board -> audio-only");
 
-  // Audio source: AEC src (mic + speaker reference) for full-duplex without
-  // echo, or the plain dev src. On ES7210 (S3-Box-3) the reference is the
-  // 2nd TDM channel, so request 4 channels and mask mic+ref (1|2).
+  // Audio source. Bridged: a custom source fed by fdaudio's ESPHome mic
+  // (already AEC-cleaned, shared with voice_assistant). Else: esp_capture's own
+  // AEC/dev source straight off the codec (standalone webrtc firmware).
   esp_capture_audio_src_if_t *asrc = nullptr;
-  if (aec_) {
+  if (bridged_) {
+    if (!bridge_audio_init_())
+      return false;
+    asrc = static_cast<esp_capture_audio_src_if_t *>(make_bridge_capture_src_());
+  } else if (aec_) {
     esp_capture_audio_aec_src_cfg_t aec_cfg = {};
     aec_cfg.record_handle = get_record_handle();
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -169,11 +188,18 @@ bool WebrtcCall::media_init_() {
     return false;
   }
 
-  // ---- Player: I2S speaker render + (optional) LCD video render ----
-  i2s_render_cfg_t i2s_cfg = {};
-  i2s_cfg.fixed_clock = true;
-  i2s_cfg.play_handle = get_playback_handle();
-  audio_render_handle_t arender = av_render_alloc_i2s_render(&i2s_cfg);
+  // ---- Player: audio render + (optional) LCD video render ----
+  // Bridged: a custom render that writes decoded PCM to fdaudio's ESPHome
+  // speaker. Else: av_render's own I2S render straight to the codec.
+  audio_render_handle_t arender = nullptr;
+  if (bridged_) {
+    arender = static_cast<audio_render_handle_t>(make_bridge_audio_render_());
+  } else {
+    i2s_render_cfg_t i2s_cfg = {};
+    i2s_cfg.fixed_clock = true;
+    i2s_cfg.play_handle = get_playback_handle();
+    arender = av_render_alloc_i2s_render(&i2s_cfg);
+  }
   if (arender == nullptr) {
     ESP_LOGE(TAG, "audio render failed");
     return false;
@@ -203,10 +229,18 @@ bool WebrtcCall::media_init_() {
     return false;
   }
 
-  // With AEC the speaker must output 2 channels: the codec loops its right
-  // channel back as the AEC reference (ES8311 on S3-Box-3). Force the render
-  // output format so the reference lines up regardless of the incoming stream.
-  if (aec_) {
+  // Force the render output format.
+  // - Bridged: mono PCM at the ESPHome speaker's rate, so av_render resamples
+  //   the decoded far-end to exactly what spk_->play() expects.
+  // - AEC standalone: 2 channels so the codec right-channel loopback is the AEC
+  //   reference (ES8311 on S3-Box-3).
+  if (bridged_) {
+    av_render_audio_frame_info_t aud_info = {};
+    aud_info.sample_rate = bridge_rate_;
+    aud_info.channel = 1;
+    aud_info.bits_per_sample = 16;
+    av_render_set_fixed_frame_info(static_cast<av_render_handle_t>(player_), &aud_info);
+  } else if (aec_) {
     av_render_audio_frame_info_t aud_info = {};
     aud_info.sample_rate = 16000;
     aud_info.channel = 2;
@@ -334,6 +368,18 @@ void WebrtcCall::start_call() {
   if (webrtc_ == nullptr || !started_)
     return;
   ESP_LOGI(TAG, "start_call: enabling peer connection");
+  // Bridged: bring up fdaudio's ESPHome speaker + mic for the call (the mic is
+  // shared via callback fan-out, so voice_assistant keeps working).
+  if (bridged_) {
+    if (spk_ != nullptr) {
+      spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, bridge_rate_));
+      spk_->start();
+    }
+    if (mic_ != nullptr && !mic_->is_running()) {
+      mic_->start();
+      mic_started_ = true;
+    }
+  }
   esp_webrtc_enable_peer_connection(static_cast<esp_webrtc_handle_t>(webrtc_), true);
   // Ringback: loop ring.aac until the peer connects (stopped in the CONNECTED
   // event) or the call is hung up.
@@ -350,8 +396,207 @@ void WebrtcCall::hangup() {
   stop_ringtone();
   esp_webrtc_enable_peer_connection(static_cast<esp_webrtc_handle_t>(webrtc_), false);
   connected_ = false;
+  if (bridged_) {
+    if (spk_ != nullptr)
+      spk_->stop();
+    if (mic_ != nullptr && mic_started_) {
+      mic_->stop();
+      mic_started_ = false;
+    }
+  }
 #endif
 }
+
+// ===========================================================================
+// fdaudio audio bridge: make webrtc a CONSUMER of fdaudio's mic/speaker (via
+// the ESPHome microphone + speaker platforms) instead of grabbing the codec.
+// This lets one firmware keep fdaudio + voice_assistant AND run webrtc.
+//
+//   TX (mic -> peer):  ESPHome mic callback -> mic_rb_ ring -> custom
+//                      esp_capture audio source (drains the ring). Sharing the
+//                      mic via the callback fan-out means we never steal samples
+//                      from voice_assistant.
+//   RX (peer -> spk):  esp_webrtc decodes the far end into av_render -> our
+//                      custom audio render -> ESPHome speaker->play() (a
+//                      thread-safe ring, mixed with media_player by fdaudio).
+//
+// NOTE: the esp_capture_audio_src_if_t vtable below tracks the canonical
+// esp_capture interface; if the registry esp_capture (~0.8) reorders it, adjust
+// the assignments (open/start/read_frame/stop/close) accordingly.
+// ===========================================================================
+#ifdef WEBRTC_CALL_ENABLED
+namespace {
+
+// --- Custom esp_capture audio source (fed by the mic ring) ------------------
+struct BridgeCaptureSrc {
+  esp_capture_audio_src_if_t base;  // MUST be the first member (this == &base)
+  RingbufHandle_t rb;
+  esp_capture_audio_info_t info;
+  std::vector<uint8_t> buf;  // persistent frame buffer handed to esp_capture
+  uint64_t samples;          // running sample count, for pts
+  bool started;
+};
+
+static int bcs_open(esp_capture_audio_src_if_t *h) { return 0; }
+static int bcs_get_codecs(esp_capture_audio_src_if_t *h,
+                          const esp_capture_codec_type_t **codecs, uint8_t *num) {
+  static const esp_capture_codec_type_t kCodecs[] = {ESP_CAPTURE_CODEC_TYPE_PCM};
+  *codecs = kCodecs;
+  *num = 1;
+  return 0;
+}
+static int bcs_negotiate(esp_capture_audio_src_if_t *h, esp_capture_audio_info_t *in_cap,
+                         esp_capture_audio_info_t *out_caps) {
+  *out_caps = reinterpret_cast<BridgeCaptureSrc *>(h)->info;
+  return 0;
+}
+static int bcs_start(esp_capture_audio_src_if_t *h) {
+  reinterpret_cast<BridgeCaptureSrc *>(h)->started = true;
+  return 0;
+}
+static int bcs_stop(esp_capture_audio_src_if_t *h) {
+  reinterpret_cast<BridgeCaptureSrc *>(h)->started = false;
+  return 0;
+}
+static int bcs_close(esp_capture_audio_src_if_t *h) { return 0; }
+static int bcs_read(esp_capture_audio_src_if_t *h, esp_capture_stream_frame_t *frame) {
+  auto *s = reinterpret_cast<BridgeCaptureSrc *>(h);
+  const size_t bps = s->info.channel * (s->info.bits_per_sample / 8);  // bytes/sample
+  const size_t chunk = (s->info.sample_rate / 50) * bps;               // ~20 ms
+  if (s->buf.size() < chunk)
+    s->buf.resize(chunk);
+  size_t filled = 0;
+  while (filled < chunk) {
+    size_t got = 0;
+    // Block briefly for the first bytes, then take whatever is queued.
+    TickType_t wait = (filled == 0) ? pdMS_TO_TICKS(40) : 0;
+    void *item = xRingbufferReceiveUpTo(s->rb, &got, wait, chunk - filled);
+    if (item == nullptr)
+      break;
+    memcpy(s->buf.data() + filled, item, got);
+    vRingbufferReturnItem(s->rb, item);
+    filled += got;
+  }
+  if (filled == 0) {
+    // Call not active / mic idle -> emit silence so the G.711 stream stays timed.
+    memset(s->buf.data(), 0, chunk);
+    filled = chunk;
+  }
+  frame->stream_type = ESP_CAPTURE_STREAM_TYPE_AUDIO;
+  frame->data = s->buf.data();
+  frame->size = static_cast<int>(filled);
+  frame->pts = static_cast<uint32_t>(s->samples * 1000 / s->info.sample_rate);
+  s->samples += filled / bps;
+  return 0;
+}
+
+// --- Custom av_render audio render (writes to the ESPHome speaker) -----------
+struct BridgeRenderCfg {  // transient, copied by init()
+  speaker::Speaker *spk;
+};
+struct BridgeRender {
+  speaker::Speaker *spk;
+  av_render_audio_frame_info_t info;
+};
+
+static audio_render_handle_t br_init(void *cfg, int cfg_size) {
+  auto *c = static_cast<BridgeRenderCfg *>(cfg);
+  if (c == nullptr || cfg_size != static_cast<int>(sizeof(BridgeRenderCfg)) || c->spk == nullptr)
+    return nullptr;
+  auto *r = new BridgeRender();
+  r->spk = c->spk;
+  return r;
+}
+static int br_open(audio_render_handle_t h, av_render_audio_frame_info_t *info) {
+  auto *r = static_cast<BridgeRender *>(h);
+  if (r == nullptr || info == nullptr)
+    return -1;
+  r->info = *info;  // speaker lifecycle is driven from start_call()/hangup()
+  return 0;
+}
+static int br_write(audio_render_handle_t h, av_render_audio_frame_t *d) {
+  auto *r = static_cast<BridgeRender *>(h);
+  if (r == nullptr || d == nullptr)
+    return -1;
+  if (d->data != nullptr && d->size > 0)
+    r->spk->play(d->data, static_cast<size_t>(d->size));  // thread-safe ring enqueue
+  return 0;
+}
+static int br_get_latency(audio_render_handle_t h, uint32_t *latency) {
+  if (latency)
+    *latency = 0;
+  return 0;
+}
+static int br_get_frame_info(audio_render_handle_t h, av_render_audio_frame_info_t *info) {
+  auto *r = static_cast<BridgeRender *>(h);
+  if (r == nullptr || info == nullptr)
+    return -1;
+  *info = r->info;
+  return 0;
+}
+static int br_set_speed(audio_render_handle_t h, float speed) { return 0; }
+static int br_close(audio_render_handle_t h) { return 0; }
+static void br_deinit(audio_render_handle_t h) { delete static_cast<BridgeRender *>(h); }
+
+}  // namespace
+
+bool WebrtcCall::bridge_audio_init_() {
+  if (mic_rb_ == nullptr) {
+    mic_rb_ = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF);
+    if (mic_rb_ == nullptr) {
+      ESP_LOGE(TAG, "mic ring buffer alloc failed");
+      return false;
+    }
+  }
+  if (!mic_subscribed_ && mic_ != nullptr) {
+    mic_->add_data_callback([this](const std::vector<uint8_t> &d) { this->on_mic_data_(d); });
+    mic_subscribed_ = true;
+  }
+  return true;
+}
+
+void WebrtcCall::on_mic_data_(const std::vector<uint8_t> &data) {
+  if (mic_rb_ == nullptr || data.empty())
+    return;
+  // Non-blocking; if the call pipeline is behind, drop rather than stall the mic.
+  xRingbufferSend(static_cast<RingbufHandle_t>(mic_rb_), data.data(), data.size(), 0);
+}
+
+void *WebrtcCall::make_bridge_capture_src_() {
+  auto *s = new BridgeCaptureSrc();
+  s->base.open = bcs_open;
+  s->base.get_support_codecs = bcs_get_codecs;
+  s->base.negotiate_caps = bcs_negotiate;
+  s->base.start = bcs_start;
+  s->base.read_frame = bcs_read;
+  s->base.stop = bcs_stop;
+  s->base.close = bcs_close;
+  s->rb = static_cast<RingbufHandle_t>(mic_rb_);
+  s->info.codec = ESP_CAPTURE_CODEC_TYPE_PCM;
+  s->info.sample_rate = bridge_rate_;
+  s->info.channel = 1;
+  s->info.bits_per_sample = 16;
+  s->samples = 0;
+  s->started = false;
+  return &s->base;  // base is first member -> address-equal to s
+}
+
+void *WebrtcCall::make_bridge_audio_render_() {
+  BridgeRenderCfg c{spk_};
+  audio_render_cfg_t cfg = {};
+  cfg.ops.init = br_init;
+  cfg.ops.open = br_open;
+  cfg.ops.write = br_write;
+  cfg.ops.get_latency = br_get_latency;
+  cfg.ops.get_frame_info = br_get_frame_info;
+  cfg.ops.set_speed = br_set_speed;
+  cfg.ops.close = br_close;
+  cfg.ops.deinit = br_deinit;
+  cfg.cfg = &c;
+  cfg.cfg_size = sizeof(c);
+  return audio_render_alloc_handle(&cfg);
+}
+#endif  // WEBRTC_CALL_ENABLED
 
 // ===========================================================================
 // Ringtone: decode the embedded ring.aac (AAC) through av_render.

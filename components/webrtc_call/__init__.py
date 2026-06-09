@@ -20,11 +20,14 @@ IMPORTANT — hardware ownership:
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import esp32
-from esphome.const import CONF_ID, CONF_WIDTH, CONF_HEIGHT
+from esphome.components import esp32, microphone, speaker
+from esphome.const import CONF_ID, CONF_WIDTH, CONF_HEIGHT, CONF_SAMPLE_RATE
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32", "network"]
+# Always available so webrtc_call.cpp can include the mic/speaker headers for the
+# fdaudio audio bridge, even in a standalone (non-bridged) webrtc firmware.
+AUTO_LOAD = ["microphone", "speaker"]
 
 CONF_SIGNALING_URL = "signaling_url"
 CONF_ROOM = "room"
@@ -40,6 +43,8 @@ CONF_TURN_PASSWORD = "turn_password"
 CONF_AUTO_CONNECT = "auto_connect"
 CONF_RINGTONE = "ringtone"
 CONF_DURATION = "duration"
+CONF_MICROPHONE_ID = "microphone_id"
+CONF_SPEAKER_ID = "speaker_id"
 
 webrtc_call_ns = cg.esphome_ns.namespace("webrtc_call")
 WebrtcCall = webrtc_call_ns.class_("WebrtcCall", cg.Component)
@@ -55,9 +60,19 @@ StopRingAction = webrtc_call_ns.class_("StopRingAction", automation.Action)
 WEBRTC_REPO = "https://github.com/espressif/esp-webrtc-solution"
 WEBRTC_REF = "main"
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(WebrtcCall),
+def _validate_bridge(config):
+    if (CONF_MICROPHONE_ID in config) != (CONF_SPEAKER_ID in config):
+        raise cv.Invalid(
+            "microphone_id and speaker_id must be set together "
+            "(the fdaudio audio bridge needs both)"
+        )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(WebrtcCall),
         # apprtc signaling server URL (self-hosted, e.g. on Unraid).
         cv.Required(CONF_SIGNALING_URL): cv.string,
         # Room id: both boards joining the same room get connected.
@@ -78,6 +93,14 @@ CONFIG_SCHEMA = cv.Schema(
         # Enable video. Set false for an audio-only call (required on boards with
         # no camera/LCD, e.g. ESP32-S3-Box-3).
         cv.Optional(CONF_VIDEO, default=True): cv.boolean,
+        # fdaudio audio bridge: share fdaudio's mic + speaker (via the ESPHome
+        # microphone + speaker platforms) instead of grabbing the codec. Set BOTH
+        # to keep fdaudio + voice_assistant in the SAME firmware as webrtc. The
+        # codec is then owned by fdaudio (webrtc skips its own audio codec init).
+        # PCM rate of those platforms (mono 16-bit) via sample_rate.
+        cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
+        cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
+        cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(min=8000, max=48000),
         # Acoustic echo cancellation for full-duplex audio. On ES7210 boards
         # (S3-Box-3) the reference is the codec loopback channel; enable this to
         # stop the speaker echoing back into the mic.
@@ -94,8 +117,10 @@ CONFIG_SCHEMA = cv.Schema(
         # Play the embedded ring.aac (AAC, decoded by av_render) as ringback when
         # a call starts; auto-stopped on connect/hangup. Set false to silence it.
         cv.Optional(CONF_RINGTONE, default=True): cv.boolean,
-    }
-).extend(cv.COMPONENT_SCHEMA)
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+    _validate_bridge,
+)
 
 
 async def to_code(config):
@@ -112,6 +137,12 @@ async def to_code(config):
     cg.add(var.set_video(config[CONF_VIDEO]))
     cg.add(var.set_aec(config[CONF_AEC]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
+    if CONF_MICROPHONE_ID in config and CONF_SPEAKER_ID in config:
+        mic = await cg.get_variable(config[CONF_MICROPHONE_ID])
+        spk = await cg.get_variable(config[CONF_SPEAKER_ID])
+        cg.add(var.set_microphone(mic))
+        cg.add(var.set_speaker(spk))
+        cg.add(var.set_audio_sample_rate(config[CONF_SAMPLE_RATE]))
     cg.add(var.set_ringtone(config[CONF_RINGTONE]))
     if CONF_STUN_SERVER in config:
         cg.add(var.set_stun_server(config[CONF_STUN_SERVER]))
