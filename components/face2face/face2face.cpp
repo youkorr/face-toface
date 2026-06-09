@@ -226,6 +226,7 @@ bool Face2Face::call_contact(const std::string &name) {
       return false;
     }
     set_peer_ip(ip);
+    peer_learned_ = false;  // explicit target, not a learned one
     ESP_LOGI(TAG, "call_contact('%s') -> %s (%s)", name.c_str(), c.host.c_str(), ip.c_str());
     call();
     return true;
@@ -305,6 +306,12 @@ void Face2Face::start_streaming_() {
 void Face2Face::go_idle_() {
   bool was_active = (state_ != STATE_IDLE);
   set_state_(STATE_IDLE);
+  // Drop a learned peer so the next call can come from a different board.
+  // A statically configured / contact-dialled peer_ip is kept.
+  if (peer_learned_) {
+    peer_ip_ = "0.0.0.0";
+    peer_learned_ = false;
+  }
   audio_due_ms_ = 0;  // cancel any pending deferred audio start
   ring_spk_started_ = false;  // ringtone (if any) is stopped via spk_->stop() below
   ring_pcm_pos_ = 0;
@@ -498,27 +505,34 @@ void Face2Face::send_frame_(F2FStream stream, const uint8_t *data, uint32_t len,
 
 void Face2Face::poll_receive_() {
   uint8_t buf[F2F_HEADER_SIZE + F2F_MAX_PAYLOAD];
+  struct sockaddr_in src {};
+  socklen_t srclen;
+  char src_ip[INET_ADDRSTRLEN];
   for (int i = 0; i < 64; i++) {
-    int n = ::recv(video_sock_, buf, sizeof(buf), 0);
+    srclen = sizeof(src);
+    int n = ::recvfrom(video_sock_, buf, sizeof(buf), 0, (struct sockaddr *) &src, &srclen);
     if (n > 0) {
       thru_rx_bytes_ += (uint32_t) n;
-      handle_packet_(buf, n, F2F_STREAM_VIDEO);
+      ::inet_ntop(AF_INET, &src.sin_addr, src_ip, sizeof(src_ip));
+      handle_packet_(buf, n, F2F_STREAM_VIDEO, src_ip);
     } else
       break;
   }
   if (audio_enabled_) {
     for (int i = 0; i < 48; i++) {
-      int n = ::recv(audio_sock_, buf, sizeof(buf), 0);
+      srclen = sizeof(src);
+      int n = ::recvfrom(audio_sock_, buf, sizeof(buf), 0, (struct sockaddr *) &src, &srclen);
       if (n > 0) {
         thru_rx_bytes_ += (uint32_t) n;
-        handle_packet_(buf, n, F2F_STREAM_AUDIO);
+        ::inet_ntop(AF_INET, &src.sin_addr, src_ip, sizeof(src_ip));
+        handle_packet_(buf, n, F2F_STREAM_AUDIO, src_ip);
       } else
         break;
     }
   }
 }
 
-void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expected) {
+void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expected, const char *src_ip) {
   if (len < F2F_HEADER_SIZE)
     return;
   auto *hdr = reinterpret_cast<const F2FHeader *>(buf);
@@ -526,6 +540,18 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
     return;
   // Any valid packet from the peer counts as presence.
   last_peer_rx_ms_ = millis();
+
+  // Learn the peer's address from incoming traffic when we don't have one yet
+  // (peer_ip_ unset). This is what makes the address-book flow symmetric: the
+  // CALLER sets peer_ip via call_contact, and the side that ANSWERS picks up the
+  // caller's IP here so its own audio/video have somewhere to go. A statically
+  // configured peer_ip is never overridden.
+  if (src_ip != nullptr && (peer_ip_.empty() || peer_ip_ == "0.0.0.0") &&
+      src_ip[0] != '\0' && std::strcmp(src_ip, "0.0.0.0") != 0) {
+    peer_ip_ = src_ip;
+    peer_learned_ = true;
+    ESP_LOGI(TAG, "learned peer address %s from incoming packet", src_ip);
+  }
 
   if (hdr->stream == F2F_STREAM_PING)
     return;

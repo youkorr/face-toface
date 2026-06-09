@@ -80,6 +80,9 @@ face2face:
 
   # Le carnet d'adresses. host = IP publique de l'ami (port-forwardée) ou,
   # mieux, son nom DDNS. En LAN pur, mets l'IP locale (192.168.x.x).
+  # NB : l'appelé apprend tout seul l'IP de l'appelant (depuis les paquets
+  # reçus), donc un contact n'est nécessaire que pour INITIER un appel —
+  # pas besoin de contact "retour" juste pour répondre.
   contacts:
     - name: "Mamie"
       host: mamie-intercom.duckdns.org     # DDNS (recommandé pour internet)

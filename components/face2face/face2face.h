@@ -200,7 +200,7 @@ class Face2Face : public Component {
   bool open_sockets_();
   void poll_receive_();
   void send_frame_(F2FStream stream, const uint8_t *data, uint32_t len, int sock);
-  void handle_packet_(const uint8_t *buf, size_t len, F2FStream expected);
+  void handle_packet_(const uint8_t *buf, size_t len, F2FStream expected, const char *src_ip);
   void send_ping_();
 
   // hardware JPEG codec
@@ -234,6 +234,10 @@ class Face2Face : public Component {
 
   // config
   std::string peer_ip_;
+  // True when peer_ip_ was learned from incoming traffic (not statically
+  // configured / not set via a contact) -> released on idle so the next caller
+  // can be a different board.
+  bool peer_learned_{false};
   // Address book: name -> host (IP or DNS/DDNS), resolved when dialled.
   struct Contact {
     std::string name;
