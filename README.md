@@ -106,14 +106,14 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/test2_esp_video_esphome
-      ref: claude/nifty-dijkstra-gdUqZ      # use the branch that matches your board
+      ref: main 
     components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: always
   # This repo — only the LAN components here (NOT webrtc_call, see note below)
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
-      ref: claude/esp32p4-video-communication-W0yEc
+      ref: main
     components: [face2face, fdaudio]
     refresh: always
 
