@@ -1,0 +1,166 @@
+# =============================================================================
+# AUDIO FULL-DUPLEX + APPEL — HABBIT Desk PRO (ESP32-P4 + ES8388/ES7210)
+# -----------------------------------------------------------------------------
+# Équivalent de waveshare-audio-fullduplex.yaml, adapté au Habbit :
+#   - codec SORTIE : ES8388 (au lieu d'ES8311)
+#   - pins I2S : lrclk29 / bclk27 / mclk30 / din28 / dout26
+#   - i2c : sda31 / scl32 (bsp_bus)
+#   - caméra sc202cs 1280x720 -> scale 3
+#
+# esp_audio_stack = 1 seul driver I2S full-duplex (micro + HP simultanés) avec
+# AEC esp_afe (aec_enabled: true + aec_reference: previous_frame) -> micro déjà
+# propre. face2face: enable_aec: false (il lit ce micro nettoyé ; évite le
+# double esp-sr).
+#
+# ⚠️ REMPLACE dans habbit.yaml les blocs : i2s_audio / audio_dac / audio_adc /
+#    microphone(i2s_audio) / speaker(i2s_audio). Gardez media_player/VA/mWW.
+#
+# ⚠️ ES8388 dans esp_audio_stack : NON confirmé officiellement (testé ES8311).
+#    Si "Unknown codec es8388" à la validation -> voir la NOTE en bas du fichier.
+# =============================================================================
+
+face2face:
+  id: f2f
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  enable_audio: true
+  audio_sample_rate: 16000
+  # --- Vidéo : downscale pour tenir sur le WiFi-over-SDIO ---
+  # sc202cs sort en 1280x720. scale 3 -> 426->416x240 (quelques Ko/image).
+  scale: 3
+  jpeg_quality: 35
+  framerate: 10
+  swap_colors: true
+  # --- Audio / appel ---
+  ring_timeout: 30s
+  audio_start_delay: 1500ms
+  # AEC gérée par esp_audio_stack/esp_afe (micro déjà propre). face2face NE refait
+  # PAS l'AEC -> enable_aec: false (sinon double esp-sr = conflit de build).
+  enable_aec: false
+  on_ringing:
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
+  on_streaming:
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
+    - lambda: "id(camera_display)->set_enabled(false);"
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+  on_idle:
+    - lambda: "id(camera_display)->set_enabled(true);"
+    - micro_wake_word.start:
+    - lvgl.widget.hide: incoming_overlay
+
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+button:
+  - platform: template
+    name: "Appeler"
+    on_press:
+      - face2face.call: f2f
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - face2face.answer: f2f
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - face2face.hangup: f2f
+
+text:
+  - platform: template
+    name: "IP correspondant"
+    id: peer_ip_input
+    icon: "mdi:ip-network"
+    mode: text
+    optimistic: true
+    restore_value: true
+    min_length: 7
+    max_length: 15
+    pattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    on_value:
+      - lambda: "id(f2f).set_peer_ip(x);"
+
+###########################################################################################################################
+# AUDIO — esp_audio_stack full-duplex + AEC (esp_afe)
+###########################################################################################################################
+esp_afe:
+  id: afe_processor
+  type: fd
+  mode: low_cost
+  mic_num: 1
+  input_format: MNR          # 1 mic (M) + unused (N) + reference (R)
+  aec_enabled: true          # AEC esp-sr : nettoie l'écho du micro
+  aec_off_output: raw_0
+  se_enabled: false          # SE/BSS inutile en mono
+  ns_enabled: true
+  vad_enabled: false
+  continuous_vad: true
+  agc_enabled: true          # gain auto : relève la voix faible
+  feed_buf_in_psram: true
+  feed_ring_in_psram: true
+  fetch_ring_in_psram: true
+
+esp_audio_stack:
+  id: audio_stack
+  audio_task_stack_in_psram: true
+  # --- pins I2S du Habbit ---
+  i2s_lrclk_pin: GPIO29
+  i2s_bclk_pin: GPIO27
+  i2s_mclk_pin: GPIO30
+  i2s_din_pin: GPIO28
+  i2s_dout_pin: GPIO26
+  sample_rate: 48000
+  output_sample_rate: 16000
+  correct_dc_offset: true
+  aec_reference: previous_frame   # référence d'écho = trame HP précédente
+  processor_id: afe_processor
+  codec:
+    i2c_id: bsp_bus
+    input:
+      type: es7210
+      address: 0x40
+      mic_selected: 0x01       # 1 seul micro (canal 0)
+      gain_db: 37.5
+    output:
+      type: es8388             # <-- Habbit : ES8388 (voir NOTE si rejeté)
+      address: 0x10
+      use_mclk: true
+  slot_bit_width: 16
+  use_tdm_reference: false
+  buffers_in_psram: true
+
+microphone:
+  - platform: esp_audio_stack
+    id: esp32_microphone
+    esp_audio_stack_id: audio_stack
+
+speaker:
+  - platform: esp_audio_stack
+    id: esp32_speaker
+    esp_audio_stack_id: audio_stack
+    sample_rate: 48000
+
+# -----------------------------------------------------------------------------
+# Votre media_player / voice_assistant / micro_wake_word existants se branchent
+# sur esp32_microphone / esp32_speaker SANS modification (mêmes ids).
+# Pensez à allumer audio_amplifier dans on_announcement / on_play comme votre
+# mp4_player (sinon le TTS ne sort pas — point déjà réglé côté waveshare).
+#
+# NOTE ES8388 : si la validation dit "Unknown codec es8388" / type non supporté,
+# 2 options :
+#   A) Vérifier l'adresse I2C réelle de l'ES8388 dans votre scan i2c au boot
+#      (souvent 0x10 ou 0x11) et corriger 'address:'.
+#   B) Si esp_audio_stack ne supporte vraiment pas l'ES8388, garder le habbit en
+#      AEC face2face (enable_aec: true) + audio half-duplex, OU demander le
+#      support ES8388 au repo esphome-intercom. Le Waveshare (ES8311) reste la
+#      carte full-duplex de référence.
+# -----------------------------------------------------------------------------

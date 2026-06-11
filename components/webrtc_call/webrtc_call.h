@@ -1,0 +1,159 @@
+#pragma once
+// webrtc_call — ESPHome component wrapping Espressif's esp-webrtc-solution.
+// Owns the camera/I2S/LCD via GMF (esp_capture / av_render); do not combine
+// with esp_video / fdaudio / lvgl-on-MIPI in the same firmware.
+//
+// Two-way (full-duplex) audio+video: the GMF `capture` (camera + mic) is SENT
+// to the peer, and the GMF `player` (LCD + speaker) RENDERS the peer's incoming
+// audio+video. Echo on the full-duplex audio path is removed by AEC (see aec_).
+// Video is optional (audio-only) so audio-only boards (e.g. ESP32-S3-Box-3,
+// which has ES7210+ES8311 but no camera/LCD) can run a voice call.
+
+#include "esphome/core/component.h"
+#include "esphome/core/automation.h"
+
+#include <string>
+#include <vector>
+#include <cstdint>
+
+namespace esphome {
+// Forward declarations so we can hold ESPHome mic/speaker without pulling their
+// headers here (kept like face2face does).
+namespace microphone { class Microphone; }
+namespace speaker { class Speaker; }
+
+namespace webrtc_call {
+
+class WebrtcCall : public Component {
+ public:
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+
+  // ---- YAML setters ----
+  void set_signaling_url(const std::string &u) { signaling_url_ = u; }
+  void set_room(const std::string &r) { room_ = r; }
+  void set_board_type(const std::string &b) { board_type_ = b; }
+  void set_board_config(const std::string &c) { board_config_ = c; }
+  void set_resolution(uint16_t w, uint16_t h) { width_ = w; height_ = h; }
+  void set_framerate(uint8_t f) { framerate_ = f; }
+  void set_video(bool v) { video_ = v; }
+  void set_aec(bool a) { aec_ = a; }
+  // Audio bridge: share fdaudio's mic/speaker (via the ESPHome microphone +
+  // speaker platforms) instead of grabbing the codec ourselves. When BOTH are
+  // set, webrtc runs "bridged": it does NOT init the audio codec (fdaudio owns
+  // it), so this firmware can keep fdaudio + voice_assistant alongside webrtc.
+  void set_microphone(microphone::Microphone *m) { mic_ = m; }
+  void set_speaker(speaker::Speaker *s) { spk_ = s; }
+  void set_audio_sample_rate(uint32_t r) { bridge_rate_ = r; }
+  void set_auto_connect(bool a) { auto_connect_ = a; }
+  void set_ringtone(bool e) { ringtone_enabled_ = e; }
+  void set_stun_server(const std::string &s) { stun_server_ = s; }
+  void set_turn(const std::string &url, const std::string &user, const std::string &pass) {
+    turn_url_ = url; turn_user_ = user; turn_pass_ = pass;
+  }
+
+  // ---- Call control (used by the automation actions) ----
+  void start_call();  // enable the peer connection (join + connect)
+  void hangup();      // disable the peer connection
+
+  // ---- Ringtone (embedded ring.aac, decoded by av_render) ----
+  // duration: ms to loop; 0 = play one loop; <0 = loop until stop_ringtone().
+  void play_ringtone(int duration_ms = -1);
+  void stop_ringtone();
+
+  bool is_connected() const { return connected_; }
+
+ protected:
+  bool media_init_();   // GMF capture + render (ported from media_sys.c)
+  bool webrtc_init_();  // esp_webrtc_open + signaling + media provider + start
+  static void ringtone_thread_(void *arg);  // AAC feed loop (port of music_play_thread)
+
+  // ---- fdaudio audio bridge (bridged_ mode) ----
+  // Mic: ESPHome microphone callback pushes PCM into mic_rb_; our custom
+  // esp_capture audio source drains it (so we share the mic with VA, no steal).
+  // Speaker: our custom av_render audio render writes decoded PCM to spk_->play.
+  bool bridge_audio_init_();             // build the custom capture src + render
+  void on_mic_data_(const std::vector<uint8_t> &data);  // mic cb -> ring buffer
+  void *make_bridge_capture_src_();      // esp_capture_audio_src_if_t* (fed by mic)
+  void *make_bridge_audio_render_();     // audio_render_handle_t -> spk_->play
+
+  // config
+  std::string signaling_url_;
+  std::string room_{"esp_room"};
+  std::string board_type_{"ESP32_P4_DEV_V14"};  // codec_board definition name
+  std::string board_config_;                    // inline codec_board definition (optional)
+  uint16_t width_{320}, height_{240};
+  uint8_t framerate_{15};
+  bool video_{true};   // false -> audio-only call (no camera/LCD, e.g. S3-Box-3)
+  bool aec_{false};    // acoustic echo cancellation for full-duplex audio
+  bool auto_connect_{false};
+  bool ringtone_enabled_{true};  // play embedded ring.aac as ringback
+  std::string stun_server_, turn_url_, turn_user_, turn_pass_;
+
+  // esp-webrtc handles (opaque; kept as void* to keep the header light)
+  void *webrtc_{nullptr};        // esp_webrtc_handle_t
+  void *capture_{nullptr};       // esp_capture_handle_t
+  void *player_{nullptr};        // av_render_handle_t
+  bool media_ready_{false};
+  bool has_video_{false};        // resolved at runtime (camera + LCD present)
+  bool started_{false};
+  volatile bool connected_{false};
+
+  // fdaudio audio bridge
+  microphone::Microphone *mic_{nullptr};
+  speaker::Speaker *spk_{nullptr};
+  bool bridged_{false};          // true when mic_ + spk_ are set (skip codec init)
+  uint32_t bridge_rate_{16000};  // PCM rate of the ESPHome mic/speaker (mono 16-bit)
+  void *mic_rb_{nullptr};        // RingbufHandle_t: mic PCM, cb -> capture src
+  bool mic_subscribed_{false};
+  bool mic_started_{false};      // did we start the mic (so we stop it on hangup)
+
+  // ringtone playback state (port of doorbell_demo media_sys.c music_*)
+  volatile bool ring_playing_{false};
+  volatile bool ring_stopping_{false};
+  int ring_duration_{-1};
+};
+
+// ---- Actions ----
+template<typename... Ts> class StartCallAction : public Action<Ts...> {
+ public:
+  explicit StartCallAction(WebrtcCall *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->start_call(); }
+ protected:
+  WebrtcCall *parent_;
+};
+
+template<typename... Ts> class HangupAction : public Action<Ts...> {
+ public:
+  explicit HangupAction(WebrtcCall *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->hangup(); }
+ protected:
+  WebrtcCall *parent_;
+};
+
+template<typename... Ts> class RingAction : public Action<Ts...> {
+ public:
+  explicit RingAction(WebrtcCall *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(int, duration)
+  void play(Ts... x) override {
+    int d = -1;  // default: loop until stop_ringtone()
+    if (this->duration_.has_value())
+      d = this->duration_.value(x...);
+    this->parent_->play_ringtone(d);
+  }
+ protected:
+  WebrtcCall *parent_;
+};
+
+template<typename... Ts> class StopRingAction : public Action<Ts...> {
+ public:
+  explicit StopRingAction(WebrtcCall *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->stop_ringtone(); }
+ protected:
+  WebrtcCall *parent_;
+};
+
+}  // namespace webrtc_call
+}  // namespace esphome

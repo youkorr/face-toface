@@ -1,0 +1,90 @@
+# =============================================================================
+# face2face — à AJOUTER dans votre waveshare.yaml existant
+# -----------------------------------------------------------------------------
+# Appel vidéo + audio P2P (IP directe, UDP) entre deux ESP32-P4, en réutilisant
+# VOS composants : tab5_cam (OV5647), esp32_microphone (ES7210),
+# esp32_speaker (ES8311) + l'encodeur/décodeur JPEG MATÉRIEL du P4.
+#
+#   Carte A : peer_ip = IP de la carte B
+#   Carte B : peer_ip = IP de la carte A
+#   (les deux sur le même réseau WiFi via votre ESP-Hosted C6)
+# =============================================================================
+
+# 1) Charger le composant (en plus de vos autres external_components)
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [face2face]
+    refresh: always
+
+# 2) Le composant face2face
+face2face:
+  id: f2f
+  peer_ip: "192.168.1.51"        # <-- IP de l'AUTRE carte
+  camera_id: tab5_cam            # votre esp_cam_sensor existant
+  microphone_id: esp32_microphone
+  # Pointez le speaker sur un resampler 48 kHz (l'audio du micro est en 16 kHz).
+  # media_resampling_speaker existe déjà dans votre config (sortie 48 kHz).
+  speaker_id: media_resampling_speaker
+  video_port: 9000
+  audio_port: 9001
+  width: 640                     # doit correspondre à la sortie RGB de tab5_cam
+  height: 480
+  framerate: 15
+  jpeg_quality: 40               # 30-50 = bon compromis débit/qualité sur WiFi
+  enable_audio: true
+  audio_sample_rate: 16000       # = sample_rate de esp32_microphone
+  ring_timeout: 30s
+  # auto_answer: true            # décrocher automatiquement (interphone)
+
+# 3) Boutons d'appel (apparaissent aussi dans Home Assistant)
+#    Signalisation native : call / answer / decline / hangup.
+button:
+  - platform: template
+    name: "Appeler"
+    on_press:
+      - face2face.call: f2f
+  - platform: template
+    name: "Décrocher"
+    on_press:
+      - face2face.answer: f2f
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - face2face.hangup: f2f
+
+# 4) Pousser l'image distante décodée (RGB565) dans un canvas LVGL.
+#    Ajoutez un widget `canvas` (id: remote_video) à la bonne taille dans une de
+#    vos pages lvgl, puis cet interval le rafraîchit ~à la cadence vidéo :
+interval:
+  - interval: 66ms               # ~15 fps
+    then:
+      - lambda: |-
+          if (id(f2f).has_new_remote_frame()) {
+            const uint8_t *rgb = id(f2f).remote_rgb565();
+            if (rgb != nullptr) {
+              lv_canvas_set_buffer(id(remote_video), (void*)rgb,
+                  id(f2f).remote_width(), id(f2f).remote_height(),
+                  LV_COLOR_FORMAT_RGB565);
+              lv_obj_invalidate(id(remote_video));
+            }
+          }
+
+# -----------------------------------------------------------------------------
+# Exemple de widget canvas à mettre dans vos pages lvgl: (taille = width x height)
+#
+# lvgl:
+#   pages:
+#     - id: call_page
+#       widgets:
+#         - canvas:
+#             id: remote_video
+#             x: 0
+#             y: 0
+#             width: 640
+#             height: 480
+#         # (optionnel) votre vue locale "self-view" via votre
+#         # lvgl_camera_display existant sur un petit canvas en incrustation.
+# -----------------------------------------------------------------------------

@@ -1,0 +1,244 @@
+# =============================================================================
+# face2face — PAGE D'APPEL LVGL 9.5 MODERNE (écran Waveshare 1024x600)
+# -----------------------------------------------------------------------------
+# Vidéo distante en plein écran + overlay translucide (nom du pair, présence,
+# boutons d'appel) + écran "appel entrant". Présence = heartbeat UDP de
+# face2face (on sait si l'autre carte est connectée, même hors appel).
+#
+# À fusionner dans votre waveshare.yaml (qui a déjà display + lvgl).
+# Camera réglée en 1024x600 pour remplir l'écran (voir esp_cam_sensor ci-dessous).
+# =============================================================================
+
+# --- 1) Caméra en 1024x600 pour un rendu plein écran ------------------------
+# (Dans votre bloc esp_cam_sensor existant, mettez :)
+#   resolution: "1024x600"
+# et faites correspondre face2face (vidéo + audio + appel, tout natif) :
+face2face:
+  id: f2f
+  peer_ip: "192.168.1.51"
+  camera_id: tab5_cam
+  microphone_id: esp32_microphone
+  speaker_id: media_resampling_speaker
+  enable_audio: true
+  ring_timeout: 30s
+  width: 1024
+  height: 600
+  framerate: 12                  # 1024x600 = lourd ; montez si le WiFi suit
+  jpeg_quality: 35
+  on_ringing:
+    - lvgl.widget.show: incoming_overlay
+    - lvgl.page.show: call_page
+  on_outgoing_call:
+    - lvgl.page.show: call_page
+  on_streaming:
+    - lvgl.widget.hide: incoming_overlay
+    - lvgl.page.show: call_page
+  on_idle:
+    - lvgl.widget.hide: incoming_overlay
+
+# --- 2) Présence exposée à Home Assistant -----------------------------------
+binary_sensor:
+  - platform: template
+    name: "Pair connecté"
+    id: peer_connected
+    device_class: connectivity
+    lambda: "return id(f2f).peer_online();"
+
+# --- 3) Boucle de rafraîchissement : vidéo + indicateur de présence ---------
+interval:
+  - interval: 80ms
+    then:
+      - lambda: |-
+          // a) pousser la dernière image distante dans le canvas plein écran
+          if (id(f2f).has_new_remote_frame()) {
+            const uint8_t *rgb = id(f2f).remote_rgb565();
+            if (rgb != nullptr) {
+              lv_canvas_set_buffer(id(remote_video), (void*)rgb,
+                  id(f2f).remote_width(), id(f2f).remote_height(),
+                  LV_COLOR_FORMAT_RGB565);
+              lv_obj_invalidate(id(remote_video));
+            }
+          }
+          // b) pastille + texte de présence (vert = en ligne, gris = hors ligne)
+          bool on = id(f2f).peer_online();
+          lv_obj_set_style_bg_color(id(presence_dot),
+              lv_color_hex(on ? 0x22C55E : 0x64748B), 0);
+          lv_label_set_text(id(presence_label), on ? "En ligne" : "Hors ligne");
+
+# --- 4) Synchronisation appel <-> page : gérée par les triggers de face2face
+#        (déjà déclarés dans le bloc face2face ci-dessus : on_ringing /
+#         on_outgoing_call / on_streaming / on_idle).
+
+# --- 5) La page d'appel (à ajouter sous lvgl: -> pages:) ---------------------
+lvgl:
+  pages:
+    - id: call_page
+      bg_color: 0x0A0E1A
+      bg_opa: COVER
+      widgets:
+        # ---- Vidéo distante : canvas plein écran ----
+        - canvas:
+            id: remote_video
+            x: 0
+            y: 0
+            width: 1024
+            height: 600
+
+        # ---- Barre de statut translucide (haut) ----
+        - obj:
+            align: TOP_MID
+            y: 0
+            width: 1024
+            height: 64
+            radius: 0
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x000000
+            bg_opa: 45%
+            widgets:
+              - obj:   # pastille de présence
+                  id: presence_dot
+                  align: LEFT_MID
+                  x: 24
+                  width: 16
+                  height: 16
+                  radius: 8
+                  border_width: 0
+                  bg_color: 0x64748B
+                  bg_opa: COVER
+              - label:
+                  id: peer_name
+                  align: LEFT_MID
+                  x: 52
+                  text: "Salon"
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_22
+              - label:
+                  id: presence_label
+                  align: RIGHT_MID
+                  x: -24
+                  text: "Hors ligne"
+                  text_color: 0x94A3B8
+                  text_font: montserrat_16
+
+        # ---- Self-view (incrustation, optionnel) ----
+        # Pour afficher VOTRE caméra ici, pointez votre lvgl_camera_display
+        # sur 'selfview_canvas' (à la taille de sortie caméra) ; sinon laissez
+        # ce cadre comme repère.
+        - obj:
+            align: BOTTOM_RIGHT
+            x: -16
+            y: -16
+            width: 200
+            height: 150
+            radius: 16
+            border_width: 2
+            border_color: 0xFFFFFF
+            border_opa: 30%
+            bg_color: 0x121826
+            bg_opa: COVER
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Moi"
+                  text_color: 0x94A3B8
+                  text_font: montserrat_16
+
+        # ---- Barre de contrôle (bas) ----
+        - obj:
+            align: BOTTOM_MID
+            y: -20
+            width: 280
+            height: 96
+            radius: 48
+            border_width: 0
+            bg_color: 0x000000
+            bg_opa: 35%
+            widgets:
+              - button:        # Appeler (vert)
+                  id: btn_call
+                  align: LEFT_MID
+                  x: 16
+                  width: 72
+                  height: 72
+                  radius: 36
+                  bg_color: 0x22C55E
+                  shadow_width: 18
+                  shadow_color: 0x22C55E
+                  shadow_opa: 50%
+                  widgets:
+                    - label: { align: CENTER, text: "Appel", text_font: montserrat_22, text_color: 0xFFFFFF }
+                  on_click:
+                    - face2face.call: f2f
+              - button:        # Raccrocher (rouge)
+                  id: btn_hangup
+                  align: RIGHT_MID
+                  x: -16
+                  width: 72
+                  height: 72
+                  radius: 36
+                  bg_color: 0xEF4444
+                  shadow_width: 18
+                  shadow_color: 0xEF4444
+                  shadow_opa: 50%
+                  widgets:
+                    - label: { align: CENTER, text: "Fin", text_font: montserrat_22, text_color: 0xFFFFFF }
+                  on_click:
+                    - face2face.hangup: f2f
+
+        # ---- Overlay "Appel entrant" (caché par défaut) ----
+        - obj:
+            id: incoming_overlay
+            hidden: true
+            align: CENTER
+            width: 1024
+            height: 600
+            radius: 0
+            border_width: 0
+            bg_color: 0x0A0E1A
+            bg_opa: 80%
+            widgets:
+              - label:
+                  align: CENTER
+                  y: -120
+                  text: "Appel entrant"
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_28
+              - label:
+                  align: CENTER
+                  y: -70
+                  text: "Salon"
+                  text_color: 0x94A3B8
+                  text_font: montserrat_22
+              - button:        # Décrocher (vert)
+                  align: CENTER
+                  x: -90
+                  y: 60
+                  width: 88
+                  height: 88
+                  radius: 44
+                  bg_color: 0x22C55E
+                  widgets:
+                    - label: { align: CENTER, text: "Appel", text_font: montserrat_22, text_color: 0xFFFFFF }
+                  on_click:
+                    - face2face.answer: f2f
+                    - lvgl.widget.hide: incoming_overlay
+              - button:        # Refuser (rouge)
+                  align: CENTER
+                  x: 90
+                  y: 60
+                  width: 88
+                  height: 88
+                  radius: 44
+                  bg_color: 0xEF4444
+                  widgets:
+                    - label: { align: CENTER, text: "Fin", text_font: montserrat_22, text_color: 0xFFFFFF }
+                  on_click:
+                    - face2face.decline: f2f
+                    - lvgl.widget.hide: incoming_overlay
+
+# -----------------------------------------------------------------------------
+# Pour ouvrir la page d'appel depuis votre UI : `lvgl.page.show: call_page`.
+# Les icônes \U0000e909 / \U0000e90a viennent de votre police d'icônes (power /
+# play) ; remplacez par vos glyphes "téléphone/raccrocher" si vous en avez.
+# -----------------------------------------------------------------------------

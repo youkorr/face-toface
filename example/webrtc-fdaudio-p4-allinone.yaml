@@ -1,0 +1,125 @@
+# =============================================================================
+# TOUT-EN-UN ESP32-P4 — fdaudio + voice_assistant + webrtc_call (cross-réseau)
+# -----------------------------------------------------------------------------
+# Le modèle que tu voulais : fdaudio TOUJOURS dans le YAML (il possède le codec,
+# donc voice_assistant marche en permanence). Selon le besoin :
+#   - communication LAN      -> tu mets `face2face` (voir fdaudio-waveshare.yaml)
+#   - communication EXTÉRIEUR -> tu mets `webrtc_call` (CE fichier)
+# Dans les deux cas fdaudio reste, et le composant transport (face2face OU
+# webrtc_call) CONSOMME le micro/HP de fdaudio via microphone_id + speaker_id
+# (pas de conflit avec voice_assistant : le micro est partagé par fan-out).
+#
+# webrtc_call ici tourne "bridgé" : il N'initialise PAS le codec audio
+# (fdaudio le possède) ; il garde sa propre caméra + LCD pour la vidéo.
+#
+# ⚠️ Première intégration à valider sur carte. Conseil : teste d'abord en
+#    audio seul (video: false) ; quand l'audio cross-réseau marche, passe la
+#    vidéo à true (la caméra/I2C peut demander un ajustement selon la carte).
+# =============================================================================
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio, webrtc_call]
+    refresh: always
+
+esp32:
+  variant: esp32p4
+  flash_size: 32MB
+  board: esp32-p4-evboard
+  framework:
+    type: esp-idf
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+# I2C pour les codecs fdaudio (adaptez à votre carte).
+i2c:
+  - id: bsp_bus
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 400kHz
+
+# --- fdaudio : moteur audio full-duplex, possède le codec (toujours présent) ---
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 37.5
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: true
+  use_afe: true            # AEC/NS/AGC complète (duplex propre)
+
+# --- micro + HP exposés à ESPHome (partagés par VA ET webrtc) ---
+microphone:
+  - platform: fdaudio
+    id: esp32_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: esp32_speaker
+    fdaudio_id: audio_engine
+
+# --- voice_assistant : marche en permanence (fdaudio toujours là) ---
+media_player:
+  - platform: speaker
+    name: "P4 Media"
+    id: media_out
+    announcement_pipeline:
+      speaker: esp32_speaker
+      format: FLAC
+      sample_rate: 16000
+      num_channels: 1
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: okay_nabu
+
+voice_assistant:
+  id: va
+  microphone: esp32_microphone
+  media_player: media_out
+  micro_wake_word: mww
+
+# --- webrtc_call : appels cross-réseau, CONSOMME l'audio de fdaudio ---
+# (remplacez ce bloc par `face2face:` pour un firmware LAN — voir
+#  fdaudio-waveshare.yaml. fdaudio + microphone + speaker restent identiques.)
+webrtc_call:
+  id: call
+  signaling_url: "http://VOTRE_SERVEUR:8080"   # apprtc self-hosté
+  room: "p4_room"
+  board_type: "ESP32_P4_DEV_V14"               # pins caméra + LCD (codec_board)
+  # Pont audio : partage le micro/HP de fdaudio (pas de conflit avec VA).
+  microphone_id: esp32_microphone
+  speaker_id: esp32_speaker
+  sample_rate: 16000
+  video: true                                  # mettez false pour tester l'audio seul d'abord
+  ringtone: true
+  # stun_server: "stun:VOTRE_SERVEUR:3478"
+  # turn_url: "turn:VOTRE_SERVEUR:3478"
+  # turn_username: "user"
+  # turn_password: "pass"
+
+# Boutons pour piloter l'appel cross-réseau.
+button:
+  - platform: template
+    name: "Appel: démarrer"
+    on_press:
+      - webrtc_call.start: call
+  - platform: template
+    name: "Appel: raccrocher"
+    on_press:
+      - webrtc_call.hangup: call
