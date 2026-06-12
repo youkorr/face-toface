@@ -304,6 +304,13 @@ bool FdAudio::init_afe_() {
   cfg->vad_init = false;
   cfg->wakenet_init = false;  // no wake word in the AFE (mWW stays separate)
   cfg->pcm_config.sample_rate = (int) mic_rate_;
+  // Run esp-sr's internal AFE processing thread on core 0, OFF the real-time
+  // audio core (1). The codec read/write + mic tasks live on core 1; if the
+  // heavy AEC/NS/AGC DSP also runs there it starves them and the audio glitches
+  // or drops. The known-working esphome-intercom puts the AFE on core 0 (~22%
+  // CPU) for exactly this reason. (Field name 'perferred' is esp-sr's spelling.)
+  cfg->afe_perferred_core = 0;
+  cfg->afe_perferred_priority = 5;
 
   const esp_afe_sr_iface_t *afe = esp_afe_handle_from_config(cfg);
   if (afe == nullptr) {
@@ -337,7 +344,9 @@ bool FdAudio::init_afe_() {
   afe_feed_run_ = true;
   TaskHandle_t t = nullptr;
   // 8 KB stack: the AFE feed() runs WebRTC NS/AGC DSP and overflows a 4 KB stack.
-  xTaskCreatePinnedToCore(afe_feed_task_, "fdaudio_afe_feed", 8192, this, 5, &t, 1);
+  // Pin to core 0 (same core as the AFE DSP) so the real-time codec read/write
+  // and mic tasks on core 1 are never starved by the heavy front-end work.
+  xTaskCreatePinnedToCore(afe_feed_task_, "fdaudio_afe_feed", 8192, this, 5, &t, 0);
   afe_feed_handle_ = (void *) t;
   ESP_LOGI(TAG, "AFE ready (AEC+NS+AGC, chunk=%d, channels=%d, fmt=MNR)", afe_chunk_, afe_nch_);
   return true;
