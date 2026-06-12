@@ -131,9 +131,18 @@ async def to_code(config):
     esp32.add_idf_sdkconfig_option("CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE", False)
 
     if config[CONF_ENABLE_AEC] or config[CONF_USE_AFE]:
-        # esp-sr master depends on esp-dsp 1.8.0 (matches the project override
-        # 'espressif/esp-dsp==1.8.0' and esp-dl >=1.7.0). Pulls both the simple
-        # AEC (aec_create) and the full AFE (esp_afe_sr).
+        # Pin esp-dsp to 1.8.0 FIRST, before esp-sr is added. esp-sr and esp-dl
+        # (the latter is also pulled by micro_wake_word / face_detection) each
+        # declare their own esp-dsp dependency; if they resolve to DIFFERENT
+        # esp-dsp versions the IDF component manager picks an incompatible build
+        # and the whole ML/audio stack faults at startup -> the symptom we saw
+        # ("enabling AEC/AFE kills BOTH speaker and mic", while AEC-off works
+        # because esp-sr is never pulled). Forcing one esp-dsp for everyone is
+        # exactly what the known-working P4 configs do (project-level override
+        # 'espressif/esp-dsp==1.8.0') and lets esp_afe + micro_wake_word coexist.
+        esp32.add_idf_component(name="espressif/esp-dsp", ref="1.8.0")
+        # esp-sr master is built against esp-dsp 1.8.0 / esp-dl >=1.7.0. Pulls
+        # both the simple AEC (aec_create) and the full AFE (esp_afe_sr).
         esp32.add_idf_component(
             name="esp-sr", repo="https://github.com/espressif/esp-sr",
             ref="master",
