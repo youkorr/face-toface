@@ -1,62 +1,59 @@
-# ESP32-S3-BOX-3 - Audio full-duplex avec fdaudio
+# ESP32-S3-BOX-3 - Full-duplex audio with fdaudio
 
-Ce document explique comment configurer et faire fonctionner l'audio
-full-duplex (microphone et haut-parleur simultanes) sur l'ESP32-S3-BOX-3 a
-l'aide du composant `fdaudio`, ainsi que l'annulation d'echo (AEC / AFE) basee
-sur esp-sr.
+This document explains how to configure and run full-duplex audio
+(simultaneous microphone and speaker) on the ESP32-S3-BOX-3 using the
+`fdaudio` component, including echo cancellation (AEC / AFE) based on esp-sr.
 
-Le fichier d'exemple complet est `example/fdaudio-s3box3-duplex-test.yaml`.
+The complete example file is `example/fdaudio-s3box3-duplex-test.yaml`.
 
-## 1. Materiel
+## 1. Hardware
 
-L'ESP32-S3-BOX-3 est une carte ESP32-S3 N16R8 (16 Mo de flash, 8 Mo de PSRAM
-octale). Son sous-systeme audio comporte deux codecs distincts sur le meme bus
-I2S et le meme bus I2C :
+The ESP32-S3-BOX-3 is an ESP32-S3 N16R8 board (16 MB flash, 8 MB octal PSRAM).
+Its audio subsystem has two separate codecs on the same I2S bus and the same
+I2C bus:
 
-| Role                | Codec   | Adresse I2C | Sens   |
-| ------------------- | ------- | ----------- | ------ |
-| Haut-parleur (sortie) | ES8311  | 0x18        | DAC    |
-| Microphones (entree)  | ES7210  | 0x40        | ADC    |
+| Role                | Codec   | I2C address | Direction |
+| ------------------- | ------- | ----------- | --------- |
+| Speaker (output)    | ES8311  | 0x18        | DAC       |
+| Microphones (input) | ES7210  | 0x40        | ADC       |
 
-L'amplificateur du haut-parleur (PA) est commande par GPIO46. Il est coupe au
-reset : il doit etre mis a l'etat haut au demarrage, sinon le codec joue mais
-aucun son ne sort.
+The speaker amplifier (PA) is controlled by GPIO46. It is disabled on reset and
+must be driven high at boot, otherwise the codec plays but no sound comes out.
 
-### Brochage
+### Pin mapping
 
-| Signal       | GPIO    |
-| ------------ | ------- |
-| I2C SDA      | GPIO8   |
-| I2C SCL      | GPIO18  |
-| I2S MCLK     | GPIO2   |
-| I2S BCLK     | GPIO17  |
-| I2S WS/LRCLK | GPIO45  |
-| I2S DIN (mic)| GPIO16  |
-| I2S DOUT (HP)| GPIO15  |
-| PA_CTRL (ampli) | GPIO46 |
+| Signal        | GPIO    |
+| ------------- | ------- |
+| I2C SDA       | GPIO8   |
+| I2C SCL       | GPIO18  |
+| I2S MCLK      | GPIO2   |
+| I2S BCLK      | GPIO17  |
+| I2S WS/LRCLK  | GPIO45  |
+| I2S DIN (mic) | GPIO16  |
+| I2S DOUT (HP) | GPIO15  |
+| PA_CTRL (amp) | GPIO46  |
 
-## 2. Principe du full-duplex
+## 2. How full-duplex works
 
-`fdaudio` ouvre un seul port I2S en mode full-duplex : un appel a
-`i2s_new_channel` cree simultanement un handle TX et un handle RX qui partagent
-la meme horloge. La meme interface de donnees I2S est partagee par l'ES8311
-(sortie) et l'ES7210 (entree) via `esp_codec_dev`. Le microphone et le
-haut-parleur fonctionnent donc en meme temps sur la meme horloge, ce qui est la
-condition d'un vrai full-duplex.
+`fdaudio` opens a single I2S port in full-duplex mode: one call to
+`i2s_new_channel` creates a TX handle and an RX handle at the same time, sharing
+the same clock. The same I2S data interface is shared by the ES8311 (output) and
+the ES7210 (input) through `esp_codec_dev`. The microphone and the speaker
+therefore run at the same time on the same clock, which is the condition for
+true full-duplex.
 
-Le codec tourne a 48 kHz (horloge reellement stable pour l'ES7210). Cote
-ESPHome :
+The codec runs at 48 kHz (the clock at which the ES7210 is genuinely stable). On
+the ESPHome side:
 
-- le microphone est decime de 48 kHz vers 16 kHz (moyenne par groupes de 3
-  echantillons) avant d'etre expose au `voice_assistant` ou a `face2face` ;
-- le haut-parleur recoit l'audio a 48 kHz ; les sources a 16 kHz sont
-  sur-echantillonnees (interpolation lineaire) avant ecriture.
+- the microphone is decimated from 48 kHz to 16 kHz (average of groups of 3
+  samples) before being exposed to `voice_assistant` or `face2face`;
+- the speaker receives audio at 48 kHz; 16 kHz sources are upsampled (linear
+  interpolation) before being written.
 
-Le composant expose un `microphone` et un `speaker` ESPHome standards, donc
-`voice_assistant`, `media_player` et `face2face` les utilisent sans
-modification.
+The component exposes a standard ESPHome `microphone` and `speaker`, so
+`voice_assistant`, `media_player` and `face2face` use them unchanged.
 
-## 3. Configuration fdaudio
+## 3. fdaudio configuration
 
 ```yaml
 fdaudio:
@@ -72,108 +69,107 @@ fdaudio:
   mic_address: 0x40
   mic_gain_db: 37.5
   output_volume: 70
-  sample_rate: 16000          # cadence exposee a ESPHome
-  codec_sample_rate: 48000    # horloge I2S/codec reelle, decimee vers 16 kHz
-  mic_channels: 1             # ES7210 : MIC1=1, MIC2=2, MIC3=4, MIC4=8
+  sample_rate: 16000          # rate exposed to ESPHome
+  codec_sample_rate: 48000    # actual I2S/codec clock, decimated to 16 kHz
+  mic_channels: 1             # ES7210: MIC1=1, MIC2=2, MIC3=4, MIC4=8
   enable_aec: true
   use_afe: true
   aec_gate_ms: 250
 ```
 
-### Reference des options principales
+### Reference of the main options
 
-| Option              | Defaut | Role |
-| ------------------- | ------ | ---- |
-| `sample_rate`       | 16000  | Cadence du micro exposee a ESPHome. |
-| `codec_sample_rate` | 48000  | Horloge I2S/codec reelle. Doit etre un multiple entier de `sample_rate`. |
-| `mic_gain_db`       | 37.5   | Gain analogique de l'ES7210 (0 a 42 dB). |
-| `mic_channels`      | 1      | Masque des entrees micro de l'ES7210. A changer si le micro est quasi muet. |
-| `mic_digital_gain`  | 1.0    | Boost logiciel du micro decime (1.0 a 16.0). |
-| `mic_agc`           | 0      | Controle automatique de gain vers un niveau cible (0 = off). |
-| `noise_gate`        | 0      | Seuil de porte de bruit logicielle (0 = off). |
-| `echo_suppression`  | 0      | Ducking far-end pour les appels, en pourcentage (0 = off). |
-| `enable_aec`        | true   | Active l'AEC simple esp-sr (aec_create). |
-| `use_afe`           | false  | Active l'AFE complete esp-sr (AEC + NS + AGC). |
-| `aec_gate_ms`       | 250    | Fenetre d'adaptation de l'AEC apres activite du HP (0 = off). |
+| Option              | Default | Role |
+| ------------------- | ------- | ---- |
+| `sample_rate`       | 16000   | Microphone rate exposed to ESPHome. |
+| `codec_sample_rate` | 48000   | Actual I2S/codec clock. Must be an integer multiple of `sample_rate`. |
+| `mic_gain_db`       | 37.5    | ES7210 analog gain (0 to 42 dB). |
+| `mic_channels`      | 1       | ES7210 mic input bitmask. Change it if the microphone is nearly silent. |
+| `mic_digital_gain`  | 1.0     | Software boost of the decimated microphone (1.0 to 16.0). |
+| `mic_agc`           | 0       | Automatic gain control toward a target level (0 = off). |
+| `noise_gate`        | 0       | Software noise-gate threshold (0 = off). |
+| `echo_suppression`  | 0       | Far-end ducking for calls, in percent (0 = off). |
+| `enable_aec`        | true    | Enable the simple esp-sr AEC (aec_create). |
+| `use_afe`           | false   | Enable the full esp-sr AFE (AEC + NS + AGC). |
+| `aec_gate_ms`       | 250     | AEC adaptation window after speaker activity (0 = off). |
 
-## 4. Annulation d'echo : AEC simple ou AFE complete
+## 4. Echo cancellation: simple AEC or full AFE
 
-Deux chemins sont disponibles. Tous deux reposent sur esp-sr.
+Two paths are available. Both rely on esp-sr.
 
-### AEC simple (`enable_aec: true`, `use_afe: false`)
+### Simple AEC (`enable_aec: true`, `use_afe: false`)
 
-Chemin leger base sur `aec_create` en mode `AEC_MODE_SR_LOW_COST`. Le traitement
-tourne en ligne dans la tache microphone. Consommation modeste (quelques
-kilo-octets de tampons, charge CPU moderee). Mode recommande pour la
-coexistence avec `voice_assistant` et `micro_wake_word`, car l'AEC lineaire
-preserve les caracteristiques spectrales utiles au mot d'eveil neuronal.
+Lightweight path based on `aec_create` in `AEC_MODE_SR_LOW_COST` mode. The
+processing runs inline in the microphone task. Modest footprint (a few kilobytes
+of buffers, moderate CPU load). This is the recommended mode for coexistence
+with `voice_assistant` and `micro_wake_word`, because linear AEC preserves the
+spectral features needed by the neural wake word.
 
-### AFE complete (`use_afe: true`)
+### Full AFE (`use_afe: true`)
 
-Pipeline esp-sr complet : AEC, suppression de bruit (NS) et controle automatique
-de gain (AGC), avec une reference far-end alignee. Format d'entree "MNR"
-(microphone, canal nul, reference). Bien plus lourd :
+Complete esp-sr pipeline: AEC, noise suppression (NS) and automatic gain control
+(AGC), with an aligned far-end reference. Input format "MNR" (microphone, null
+channel, reference). Much heavier:
 
-- flash : esp-sr, esp-dl et esp-dsp ajoutent de l'ordre de 1 Mo au binaire ;
-- PSRAM obligatoire (plusieurs centaines de kilo-octets de tampons internes) ;
-- charge CPU significative et continue ;
-- taches dediees (lecture du codec et alimentation de l'AFE, plus le thread de
-  traitement interne d'esp-sr).
+- flash: esp-sr, esp-dl and esp-dsp add on the order of 1 MB to the binary;
+- PSRAM required (several hundred kilobytes of internal buffers);
+- significant and continuous CPU load;
+- dedicated tasks (codec read and AFE feed, plus the esp-sr internal processing
+  thread).
 
-L'AFE ne se justifie que si l'AEC simple ne supprime pas suffisamment l'echo.
+The AFE is only worth it when the simple AEC does not suppress enough echo.
 
-### Placement sur les coeurs
+### Core placement
 
-Les taches temps reel (lecture/ecriture du codec, microphone, haut-parleur)
-sont sur le coeur 1. Le traitement lourd de l'AFE (thread interne esp-sr et
-tache d'alimentation) est place sur le coeur 0, afin de ne pas affamer le
-chemin audio temps reel. Sans cette separation, le son peut devenir hache.
+The real-time tasks (codec read/write, microphone, speaker) run on core 1. The
+heavy AFE processing (esp-sr internal thread and feed task) is placed on core 0
+so it does not starve the real-time audio path. Without this separation the
+audio can become choppy.
 
-## 5. Gating de l'AEC (aec_gate_ms)
+## 5. AEC gating (aec_gate_ms)
 
-Un echo n'existe dans le micro que pendant (ou juste apres) la lecture du
-haut-parleur. En dehors de cette fenetre, il n'y a rien a annuler ; si le filtre
-adaptatif continue de tourner sur un signal microphone seul, il derive et finit
-par attenuer la vraie voix.
+Echo only exists in the microphone while the speaker is (or just was) playing.
+Outside that window there is nothing to cancel; if the adaptive filter keeps
+running on a microphone-only signal it drifts and eventually attenuates real
+speech.
 
-`aec_gate_ms` definit la fenetre d'adaptation apres une activite du
-haut-parleur :
+`aec_gate_ms` defines the adaptation window after speaker activity:
 
-- pendant cette fenetre, l'AEC adapte normalement ;
-- au-dela (silence reel du HP), l'adaptation est gelee :
-  - en AEC simple, `aec_process` est saute et le micro passe sans traitement ;
-  - en AFE, la reference est mise a zero (l'anneau est tout de meme vide pour
-    conserver l'alignement micro/reference).
+- inside the window, the AEC adapts normally;
+- beyond it (true speaker silence) adaptation is frozen:
+  - in simple AEC, `aec_process` is skipped and the microphone passes through
+    untouched;
+  - in AFE, the reference is forced to zero (the ring is still drained to keep
+    microphone/reference alignment).
 
-Reglage :
+Tuning:
 
-- 250 ms (defaut) couvrent la traine acoustique et codec habituelle ;
-- augmenter (350 a 500) si le debut des phrases est coupe juste apres l'arret
-  du HP ;
-- diminuer (150 a 200) si trop d'echo passe immediatement apres l'arret du HP ;
-- `aec_gate_ms: 0` desactive le gating (AEC toujours active, ancien
-  comportement).
+- 250 ms (default) covers the usual acoustic and codec tail;
+- increase it (350 to 500) if the start of sentences is cut right after the
+  speaker stops;
+- decrease it (150 to 200) if too much echo passes immediately after the speaker
+  stops;
+- `aec_gate_ms: 0` disables gating (AEC always on, the previous behaviour).
 
-L'etat du gating est affiche dans les logs au demarrage :
+The gating state is printed in the logs at startup:
 
 ```
 AEC: enabled (gate: on)
 AEC gate window: 250 ms
 ```
 
-## 6. Dependances et alignement esp-dsp
+## 6. Dependencies and esp-dsp alignment
 
-Activer `enable_aec` ou `use_afe` tire automatiquement esp-sr dans le firmware.
-esp-sr et esp-dl (ce dernier etant aussi tire par `micro_wake_word`) declarent
-chacun leur propre dependance sur esp-dsp. Sans version commune imposee, le
-gestionnaire de composants IDF peut resoudre des versions d'esp-dsp differentes
-et incompatibles ; la pile audio/ML faute alors au demarrage et l'on perd a la
-fois le haut-parleur et le microphone, alors que le meme firmware sans AEC
-fonctionne (car esp-sr n'est jamais tire).
+Enabling `enable_aec` or `use_afe` automatically pulls esp-sr into the firmware.
+esp-sr and esp-dl (the latter also pulled by `micro_wake_word`) each declare
+their own esp-dsp dependency. Without a single forced version, the IDF component
+manager can resolve different and incompatible esp-dsp versions; the audio/ML
+stack then faults at startup and both the speaker and the microphone are lost,
+while the same firmware without AEC works (because esp-sr is never pulled).
 
-Pour eviter cela, le composant `fdaudio` epingle lui-meme
-`espressif/esp-dsp==1.8.0` des que l'AEC ou l'AFE est active. Le fichier
-d'exemple ajoute en plus l'override au niveau projet (priorite finale) :
+To avoid this, the `fdaudio` component pins `espressif/esp-dsp==1.8.0` itself as
+soon as AEC or AFE is enabled. The example file also adds the override at the
+project level (final priority):
 
 ```yaml
 esp32:
@@ -185,62 +181,62 @@ esp32:
       enable_idf_experimental_features: true
 ```
 
-Cet alignement permet a l'AFE esp-sr et a `micro_wake_word` de coexister.
+This alignment lets the esp-sr AFE and `micro_wake_word` coexist.
 
-## 7. Compilation et flash
+## 7. Build and flash
 
 ```bash
 esphome run example/fdaudio-s3box3-duplex-test.yaml
 ```
 
-Notes :
+Notes:
 
-- `compile_process_limit: 1` est conseille (les piles esp-dl et esp-sr rendent
-  la compilation lourde et peuvent provoquer un arret memoire "cc1plus Killed").
-- La PSRAM octale est requise par l'AFE ; le fichier d'exemple active
-  `CONFIG_SPIRAM_MODE_OCT`, `CONFIG_SPIRAM_SPEED_80M` et
+- `compile_process_limit: 1` is recommended (the esp-dl and esp-sr stacks make
+  compilation heavy and can trigger an out-of-memory "cc1plus Killed").
+- Octal PSRAM is required by the AFE; the example enables
+  `CONFIG_SPIRAM_MODE_OCT`, `CONFIG_SPIRAM_SPEED_80M` and
   `CONFIG_SPIRAM_USE_MALLOC`.
-- Le watchdog de tache est desactive au demarrage, car l'initialisation esp-sr
-  peut bloquer la loopTask quelques secondes.
+- The task watchdog is disabled at startup, because esp-sr initialization can
+  block the loop task for a few seconds.
 
-## 8. Validation du full-duplex
+## 8. Validating full-duplex
 
-1. Lancer l'assistant vocal.
-2. Pendant la reponse vocale (TTS), prononcer le mot d'eveil.
-3. Interpretation :
-   - l'appareil vous entend pendant qu'il parle : full-duplex operationnel ;
-   - il ne vous entend que lorsque le haut-parleur se tait : l'AEC ou le duplex
-     doit etre ajuste.
+1. Start the voice assistant.
+2. During the spoken response (TTS), say the wake word.
+3. Interpretation:
+   - the device hears you while it is speaking: full-duplex is working;
+   - it only hears you once the speaker goes silent: the AEC or the duplex needs
+     adjustment.
 
-Les premieres lectures du microphone sont tracees au niveau INFO :
+The first microphone reads are logged at INFO level:
 
 ```
 mic read #1: ret=0 raw_peak=1234 (read 1536 codec samples)
 ```
 
-Un `raw_peak` proche de 0 indique un microphone muet (voir le depannage).
+A `raw_peak` close to 0 indicates a silent microphone (see troubleshooting).
 
-## 9. Depannage
+## 9. Troubleshooting
 
-| Symptome | Cause probable | Action |
-| -------- | -------------- | ------ |
-| Plus de son ni micro des que AEC/AFE est active | Versions esp-dsp incompatibles entre esp-sr et esp-dl | Verifier l'epingle `esp-dsp==1.8.0` (automatique cote composant ; presente aussi dans l'exemple). |
-| Aucun son alors que le micro fonctionne | PA non active | S'assurer que GPIO46 est mis a l'etat haut au boot (`output.turn_on`). |
-| Microphone quasi muet (`raw_peak` proche de 0) | Mauvais canal ES7210 | Essayer `mic_channels: 2`, `4`, ou `3` selon le cablage. |
-| Microphone trop faible pour le mot d'eveil | Gain insuffisant | Augmenter `mic_gain_db`, ou utiliser `mic_digital_gain` / `mic_agc`. |
-| L'AEC coupe le debut des phrases | Fenetre de gating trop courte | Augmenter `aec_gate_ms` (350 a 500). |
-| Echo residuel juste apres l'arret du HP | Fenetre de gating trop longue | Diminuer `aec_gate_ms` (150 a 200). |
-| Son hache quand l'AFE tourne | Contention CPU sur le coeur 1 | Verifier que l'AFE est bien sur le coeur 0 (place par defaut). |
-| Compilation arretee ("cc1plus Killed") | Memoire insuffisante a la compilation | Conserver `compile_process_limit: 1`. |
+| Symptom | Likely cause | Action |
+| ------- | ------------ | ------ |
+| No sound and no mic as soon as AEC/AFE is enabled | Incompatible esp-dsp versions between esp-sr and esp-dl | Check the `esp-dsp==1.8.0` pin (automatic in the component; also present in the example). |
+| No sound while the microphone works | PA not enabled | Make sure GPIO46 is driven high at boot (`output.turn_on`). |
+| Microphone nearly silent (`raw_peak` close to 0) | Wrong ES7210 channel | Try `mic_channels: 2`, `4`, or `3` depending on the wiring. |
+| Microphone too weak for the wake word | Insufficient gain | Increase `mic_gain_db`, or use `mic_digital_gain` / `mic_agc`. |
+| AEC cuts the start of sentences | Gating window too short | Increase `aec_gate_ms` (350 to 500). |
+| Residual echo right after the speaker stops | Gating window too long | Decrease `aec_gate_ms` (150 to 200). |
+| Choppy sound while the AFE runs | CPU contention on core 1 | Confirm the AFE is on core 0 (the default placement). |
+| Compilation aborted ("cc1plus Killed") | Out of memory during compilation | Keep `compile_process_limit: 1`. |
 
-## 10. Ressources et compromis
+## 10. Resources and trade-offs
 
-| Chemin | Flash | RAM / PSRAM | CPU |
-| ------ | ----- | ----------- | --- |
-| Sans AEC | minimal | minimal | minimal |
-| AEC simple | quelques centaines de Ko | quelques Ko | modere (en ligne) |
-| AFE complete | de l'ordre de 1 Mo | plusieurs centaines de Ko en PSRAM | significatif (coeur 0) |
+| Path | Flash | RAM / PSRAM | CPU |
+| ---- | ----- | ----------- | --- |
+| Without AEC | minimal | minimal | minimal |
+| Simple AEC | a few hundred KB | a few KB | moderate (inline) |
+| Full AFE | on the order of 1 MB | several hundred KB in PSRAM | significant (core 0) |
 
-Recommandation : pour un full-duplex avec barge-in fiable a moindre cout,
-commencer par `enable_aec: true` et `use_afe: false`, puis ne passer a l'AFE que
-si l'echo residuel reste genant.
+Recommendation: for reliable full-duplex with barge-in at the lowest cost, start
+with `enable_aec: true` and `use_afe: false`, then move to the AFE only if the
+residual echo remains a problem.
