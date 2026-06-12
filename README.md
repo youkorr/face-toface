@@ -19,6 +19,11 @@ hardware JPEG codec, esp-webrtc-solution). No paid services, no cloud lock-in.
 > board, mostly for IDF enum/field names that drift slightly between ESP-IDF
 > versions. Each component degrades gracefully and logs what it is doing.
 
+**Board guide: [ESP32-S3-BOX-3 full-duplex audio](docs/esp32-s3-box-3.md)** —
+complete walkthrough of the `fdaudio` full-duplex setup on the S3-BOX-3
+(pin mapping, AEC vs AFE, echo gating, the esp-dsp alignment fix,
+build/flash, and troubleshooting).
+
 ---
 
 ## Table of contents
@@ -32,6 +37,8 @@ hardware JPEG codec, esp-webrtc-solution). No paid services, no cloud lock-in.
 7. [Examples](#7-examples)
 8. [Build notes & troubleshooting](#8-build-notes--troubleshooting)
 9. [Sources](#9-sources)
+
+**Board-specific guide:** [ESP32-S3-BOX-3 full-duplex audio](docs/esp32-s3-box-3.md)
 
 ---
 
