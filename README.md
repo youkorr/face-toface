@@ -112,7 +112,7 @@ external_components:
   # Camera + video pipeline (the OTHER repo)
   - source:
       type: git
-      url: https://github.com/youkorr/test2_esp_video_esphome
+      url: https://github.com/youkorr/esphome_esp-video
       ref: main 
     components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: always
