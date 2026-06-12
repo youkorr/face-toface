@@ -60,6 +60,10 @@ class FdAudio : public Component {
   void set_out_volume(int v);  // 0..100, applied live to the codec if open
   void set_use_mclk(bool u) { use_mclk_ = u; }
   void set_aec_enabled(bool e) { aec_enabled_ = e; }
+  // AEC gating window (ms): the AEC only adapts while the speaker has played the
+  // far end within this window. During silence the adaptive filter is frozen so
+  // it can't drift and start cancelling real speech. 0 = gating off (always on).
+  void set_aec_gate_ms(int ms) { aec_gate_ms_ = ms; }
   // Use the full esp-sr AFE (AEC+NS+AGC with an aligned reference) instead of
   // the simple aec_create path. This is the proper echo fix.
   void set_use_afe(bool e) { use_afe_ = e; }
@@ -81,6 +85,10 @@ class FdAudio : public Component {
   bool init_aec_();
   void deinit_();
   void run_aec_(int16_t *mic, size_t samples);  // in-place on mic buffer
+  // True while the far end (speaker) has played recently enough that its echo is
+  // still in the mic and the AEC/AFE should adapt; false during silence so the
+  // adaptive filter is frozen. Shared by the simple AEC and the AFE feed.
+  bool far_end_active_() const;
 
   // config
   int mclk_pin_{-1}, bclk_pin_{-1}, lrclk_pin_{-1}, din_pin_{-1}, dout_pin_{-1};
@@ -111,6 +119,7 @@ class FdAudio : public Component {
   int out_volume_{70};
   bool use_mclk_{true};
   bool aec_enabled_{true};
+  int aec_gate_ms_{250};  // AEC adaptation window after speaker activity (0 = off)
 
   // I2S
   i2s_chan_handle_t tx_chan_{nullptr};

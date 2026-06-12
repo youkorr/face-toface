@@ -31,6 +31,7 @@ CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
 CONF_USE_MCLK = "use_mclk"
 CONF_ENABLE_AEC = "enable_aec"
+CONF_AEC_GATE_MS = "aec_gate_ms"
 CONF_USE_AFE = "use_afe"
 CONF_CODEC_SAMPLE_RATE = "codec_sample_rate"
 CONF_MIC_DIGITAL_GAIN = "mic_digital_gain"
@@ -91,6 +92,12 @@ CONFIG_SCHEMA = cv.Schema(
         # mic_digital_gain. This is what fixes faint face2face audio.
         cv.Optional(CONF_MIC_AGC, default=0): cv.int_range(min=0, max=30000),
         cv.Optional(CONF_ENABLE_AEC, default=True): cv.boolean,
+        # AEC adaptation window (ms) after speaker activity. The AEC/AFE only
+        # adapts while the speaker has played within this window; during silence
+        # the adaptive filter is frozen so it can't drift and start cancelling
+        # your real voice. ~250 ms covers the acoustic+codec tail. 0 = gating off
+        # (AEC always on, the old behaviour).
+        cv.Optional(CONF_AEC_GATE_MS, default=250): cv.int_range(min=0, max=2000),
         # Use the full esp-sr AFE (AEC + NS + AGC with an aligned reference)
         # instead of the simple aec_create path. The proper echo fix.
         cv.Optional(CONF_USE_AFE, default=False): cv.boolean,
@@ -120,6 +127,7 @@ async def to_code(config):
     cg.add(var.set_out_volume(config[CONF_OUTPUT_VOLUME]))
     cg.add(var.set_use_mclk(config[CONF_USE_MCLK]))
     cg.add(var.set_aec_enabled(config[CONF_ENABLE_AEC]))
+    cg.add(var.set_aec_gate_ms(config[CONF_AEC_GATE_MS]))
     cg.add(var.set_use_afe(config[CONF_USE_AFE]))
 
     # Espressif codec driver (drives ES8311/ES8388/ES7210 over I2C+I2S).

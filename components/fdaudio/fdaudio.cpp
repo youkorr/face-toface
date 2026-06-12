@@ -47,7 +47,10 @@ void FdAudio::dump_config() {
                 noise_gate_thresh_);
   ESP_LOGCONFIG(TAG, "  Output codec: %s (0x%02X), mic ES7210 (0x%02X)",
                 out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388", out_addr_, in_addr_);
-  ESP_LOGCONFIG(TAG, "  AEC: %s", aec_enabled_ ? "enabled" : "off");
+  ESP_LOGCONFIG(TAG, "  AEC: %s (gate: %s)", aec_enabled_ ? "enabled" : "off",
+                aec_gate_ms_ > 0 ? "on" : "off");
+  if (aec_gate_ms_ > 0)
+    ESP_LOGCONFIG(TAG, "  AEC gate window: %d ms", aec_gate_ms_);
 }
 
 void FdAudio::set_out_volume(int v) {
@@ -257,9 +260,26 @@ bool FdAudio::init_aec_() {
 #endif
 }
 
+// Echo only exists in the mic while the speaker is (or just was) playing the far
+// end. Outside that window there is nothing to cancel, and letting the adaptive
+// filter keep running on mic-only signal makes it drift and then chew into real
+// speech (the classic "AEC eats my voice"). Gate adaptation to a short window
+// after speaker activity. The peak floor (200) is deliberately lower than the
+// far-end ducking's (800): we still want the AEC to adapt on quiet playback, we
+// only want to freeze it on true silence.
+bool FdAudio::far_end_active_() const {
+  if (aec_gate_ms_ <= 0)
+    return true;  // gating disabled -> AEC always on
+  return (millis() - last_spk_ms_ < (uint32_t) aec_gate_ms_) && (last_spk_peak_ > 200);
+}
+
 void FdAudio::run_aec_(int16_t *mic, size_t samples) {
 #ifdef FDAUDIO_USE_AEC
   if (!aec_ready_)
+    return;
+  // Gate: freeze the AEC during speaker silence so it can't drift (see
+  // far_end_active_). Pass the mic through clean when there's no echo to cancel.
+  if (!far_end_active_())
     return;
   // Process in chunk_-sized blocks; pull the time-aligned far-end reference.
   size_t off = 0;
@@ -380,6 +400,8 @@ void FdAudio::afe_feed_task_(void *param) {
       vTaskDelay(1);
       continue;
     }
+    // Evaluate the AEC gate once per fed chunk (~16-32 ms): cheap and consistent.
+    const bool far_active = self->far_end_active_();
     for (int i = 0; i < chunk; i++) {
       int32_t acc = 0;
       for (uint32_t k = 0; k < decim; k++)
@@ -387,11 +409,16 @@ void FdAudio::afe_feed_task_(void *param) {
       int32_t s = (int32_t) ((acc / (int32_t) decim) * self->mic_digital_gain_);
       if (s > 32767) s = 32767;
       if (s < -32768) s = -32768;
+      // Gate the reference: always drain the ring (keeps mic/ref aligned), but
+      // feed the AFE a ZERO reference during speaker silence so its internal AEC
+      // has nothing to adapt to and can't drift into real speech.
       int16_t ref = 0;
       if (self->ref_count_ > 0) {
-        ref = self->ref_ring_[self->ref_head_];
+        int16_t r = self->ref_ring_[self->ref_head_];
         self->ref_head_ = (self->ref_head_ + 1) % self->ref_ring_.size();
         self->ref_count_--;
+        if (far_active)
+          ref = r;
       }
       int base = i * nch;
       self->afe_feed_[base + 0] = (int16_t) s;            // M (mic)
