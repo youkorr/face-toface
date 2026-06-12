@@ -6,8 +6,8 @@
 # référence d'esp-sr. AUCUN rapport avec WebRTC (WebRTC = firmware P4 séparé).
 #
 # Test : lancez l'assistant ; PENDANT qu'il parle (TTS), dites le mot d'éveil.
-#   - il vous entend pendant qu'il parle           -> FULL-DUPLEX OK ✅
-#   - il ne vous entend que quand le HP se tait     -> AEC/duplex à ajuster
+#   - il vous entend pendant qu'il parle           -> FULL-DUPLEX OK
+#   - il ne vous entend que quand le HP se tait     -> AEC/duplex a ajuster
 #
 # Pins/codecs = définition codec_board "ESP32_S3_BOX_3" :
 #   i2c  sda=8  scl=18      ES8311 @0x18 (HP)   ES7210 @0x40 (micros)
