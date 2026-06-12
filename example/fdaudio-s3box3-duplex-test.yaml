@@ -6,8 +6,8 @@
 # référence d'esp-sr. AUCUN rapport avec WebRTC (WebRTC = firmware P4 séparé).
 #
 # Test : lancez l'assistant ; PENDANT qu'il parle (TTS), dites le mot d'éveil.
-#   - il vous entend pendant qu'il parle           -> FULL-DUPLEX OK ✅
-#   - il ne vous entend que quand le HP se tait     -> AEC/duplex à ajuster
+#   - il vous entend pendant qu'il parle           -> FULL-DUPLEX OK
+#   - il ne vous entend que quand le HP se tait     -> AEC/duplex a ajuster
 #
 # Pins/codecs = définition codec_board "ESP32_S3_BOX_3" :
 #   i2c  sda=8  scl=18      ES8311 @0x18 (HP)   ES7210 @0x40 (micros)
@@ -36,12 +36,27 @@ esp32:
   board: esp32-s3-devkitc-1
   framework:
     type: esp-idf
+    # Force esp-dsp 1.8.0 pour TOUT le projet (priorité FINAL). Sans ce pin,
+    # esp-sr (AFE/AEC) et esp-dl (tiré par micro_wake_word) résolvent des
+    # versions d'esp-dsp DIFFÉRENTES -> la pile ML/audio plante au démarrage et
+    # on perd À LA FOIS le HP et le micro dès qu'on active enable_aec/use_afe
+    # (alors que AEC off marche, car esp-sr n'est jamais tiré). C'est exactement
+    # le réglage des configs P4 qui fonctionnent.
+    components:
+      - espressif/esp-dsp==1.8.0
+    advanced:
+      enable_idf_experimental_features: true
     sdkconfig_options:
-      # L'audio temps-réel peut bloquer la loopTask au boot -> task_wdt.
+      # L'audio temps-réel + l'init esp-sr peuvent bloquer la loopTask au boot
+      # -> task_wdt. On retire la surveillance du WDT (audio = temps-réel légitime).
       CONFIG_ESP_TASK_WDT_EN: "n"
-      # PSRAM octal 80 MHz (N16R8).
+      # esp-sr/AFE alloue gros : pile loopTask + main task plus larges au boot.
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      # PSRAM octal 80 MHz (N16R8) + malloc PSRAM (l'AFE esp-sr a besoin de PSRAM).
       CONFIG_SPIRAM_MODE_OCT: "y"
       CONFIG_SPIRAM_SPEED_80M: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
 
 psram:
   mode: octal
@@ -64,7 +79,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
-      ref: claude/esp32p4-video-communication-W0yEc
+      ref: claude/esp32-duplex-audio-faudio-3oj4fm
     components: [fdaudio]
     refresh: always
 
