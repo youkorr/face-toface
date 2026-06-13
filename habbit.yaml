@@ -220,8 +220,17 @@ external_components:
       type: git
       url: https://github.com/youkorr/test2_esp_video_esphome
       ref: main #claude/add-webp-storage-support-BtuK2  #claude/gracious-ride-lqF8Q   #claude/confident-maxwell-Sx6bM #claude/fix-coco-detection-esp32-DKktc #claude/fix-cache-line-size-8vT5R #claude/fix-coco-detection-esp32-DKktc #claude/yolo-esp32-camera-support-Ian86  #claude/fix-camera-h264-Grgbl #claude/yolo-esp32-camera-support-Ian86 #claude/add-webp-storage-support-BtuK2 #claude/usb-media-storage-zNT22 #claude/fix-mp4-stuttering-QWMcU #claude/fix-esphome-ff-header-LUVh2  #claude/optimize-face-detection-memory-0mKRM #claude/decouple-esp-video-Hr7PK
-    components: [sd_mmc_card, webdavbox3, storage, esp_video, esp_cam_sensor, lvgl_camera_display]
-    refresh: always 
+    components: [sd_mmc_card, webdavbox3, storage]
+    refresh: always
+  # Composants vidéo tirés de esphome_esp-video : contient le correctif couleurs
+  # SC202CS (CCM ~5000K) ET le support USB-UVC, mergés sur main. esp_ipa /
+  # esp_sccb_intf sont fournis comme dépôts frères dans ce même clone.
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: main
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: always
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
@@ -348,6 +357,7 @@ esp_video:
   xclk_freq: 24000000
   enable_jpeg: true
   enable_isp: true
+  enable_uvc: true          # caméra USB externe (UVC) sur le port USB-OTG du P4
   use_heap_allocator: false
 
 # ============================================================================
