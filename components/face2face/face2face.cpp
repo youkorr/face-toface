@@ -90,6 +90,15 @@ void Face2Face::loop() {
 
   poll_receive_();
 
+  // Decode only the most recent video frame received this iteration (the recv
+  // path just stashes the latest JPEG). One decode per loop on the shared HW
+  // engine; older frames in the same burst are skipped on purpose.
+  if (pending_jpeg_ready_) {
+    pending_jpeg_ready_ = false;
+    if (decode_jpeg_(pending_jpeg_.data(), pending_jpeg_len_))
+      new_remote_frame_ = true;
+  }
+
   uint32_t now_ms = millis();
 
   // Heartbeat (presence), even when idle.
@@ -596,8 +605,15 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
   asmb.active = false;
 
   if (expected == F2F_STREAM_VIDEO) {
-    if (decode_jpeg_(asmb.data.data(), asmb.frame_size))
-      new_remote_frame_ = true;
+    // Don't decode here: several frames can complete in one poll_receive_ burst
+    // and only the newest is ever shown. Stash the latest JPEG (zero-copy swap)
+    // and decode exactly one -- the freshest -- per loop(), so the shared HW
+    // JPEG engine isn't burned re-decoding frames we'd immediately overwrite,
+    // and latency stays low. Decoding off the recv path also keeps draining the
+    // socket (fewer dropped fragments).
+    std::swap(pending_jpeg_, asmb.data);
+    pending_jpeg_len_ = asmb.frame_size;
+    pending_jpeg_ready_ = true;
   } else {
     play_audio_(asmb.data.data(), asmb.frame_size);
   }
@@ -758,6 +774,9 @@ void Face2Face::release_media_() {
   new_remote_frame_ = false;
   video_asm_ = FrameAssembler{};
   audio_asm_ = FrameAssembler{};
+  std::vector<uint8_t>().swap(pending_jpeg_);
+  pending_jpeg_len_ = 0;
+  pending_jpeg_ready_ = false;
 }
 
 // Dedicated video-TX task. Pinned to core 1 so the heavy RGB->JPEG encode runs

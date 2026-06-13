@@ -343,6 +343,11 @@ class Face2Face : public Component {
   FrameAssembler video_asm_;
   FrameAssembler audio_asm_;
 
+  // Latest fully-received video JPEG, decoded once per loop() (newest wins).
+  std::vector<uint8_t> pending_jpeg_;
+  uint32_t pending_jpeg_len_{0};
+  bool pending_jpeg_ready_{false};
+
   std::vector<uint8_t> remote_fb_;
   uint16_t remote_w_{0};
   uint16_t remote_h_{0};

@@ -960,10 +960,13 @@ interval:
             #- lvgl.image.update:
                 #id: animation_widget
                 #src: img_animation_active
-  - interval: 80ms
+  # Push de la vidéo distante : 33 ms = jusqu'à ~30 fps à l'écran. C'EST le
+  # plafond d'affichage -- à 80 ms on ne voyait que 12,5 fps quelle que soit la
+  # vitesse d'arrivée des frames. has_new_remote_frame() ne redessine que s'il y
+  # a vraiment une nouvelle image (zéro redraw inutile).
+  - interval: 33ms
     then:
       - lambda: |-
-          // a) pousser la dernière image distante dans le canvas plein écran
           if (id(f2f).has_new_remote_frame()) {
             const uint8_t *rgb = id(f2f).remote_rgb565();
             if (rgb != nullptr) {
@@ -973,7 +976,11 @@ interval:
               lv_obj_invalidate(id(remote_video));
             }
           }
-          // b) pastille + texte de présence (vert = en ligne, gris = hors ligne)
+  # Présence : 1 Hz suffit (pastille verte/grise + texte). Inutile de recalculer
+  # ces chaînes 30x/s comme quand c'était dans la boucle vidéo à 80 ms.
+  - interval: 1s
+    then:
+      - lambda: |-
           bool on = id(f2f).peer_online();
           lv_obj_set_style_bg_color(id(presence_dot),
               lv_color_hex(on ? 0x22C55E : 0x64748B), 0);
