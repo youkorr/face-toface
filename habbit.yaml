@@ -245,9 +245,14 @@ face2face:
   enable_aec: true
   aec_mode: voip_high_perf
   aec_filter_length: 4
-  width: 800                     # borne mémoire = sortie caméra (800x800)
+  width: 800                     # borne mémoire initiale du framebuffer distant
   height: 800
-  framerate: 12
+  # Downscale MATÉRIEL (PPA / 2D-DMA) : la caméra sort du 1280x720, on encode et
+  # on envoie du ~800x448 au lieu de la pleine frame -> bien plus fluide, sans
+  # charger le CPU ni voler la bande passante PSRAM au moteur JPEG. 0 = désactivé
+  # (on retombe sur le `scale` entier). 800 = la résolution de visualisation visée.
+  output_width: 800
+  framerate: 20                  # plus de marge maintenant que la frame est légère
   jpeg_quality: 35
   on_ringing:
     - lvgl.widget.show: incoming_overlay

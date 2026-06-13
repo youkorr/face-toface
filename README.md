@@ -244,7 +244,9 @@ face2face:
 | `width` / `height` | 640 / 480 | Must match the camera RGB output. |
 | `framerate` | 15 | 1..60. |
 | `jpeg_quality` | 40 | 10..100. |
-| `scale` | 3 | Downscale before encode; the main FPS/latency lever. |
+| `scale` | 3 | Integer downscale before encode (used when `output_width` is 0). |
+| `output_width` | 0 | **PPA hardware resize** target width (0 = use `scale`). Resizes the camera frame on the P4's Pixel-Processing Accelerator (2D-DMA) before the JPEG encode — fractional, off the CPU. The best FPS lever when you want to *keep a specific viewing resolution*: e.g. a 1280×720 sensor → `output_width: 800` encodes/sends ~800×448 instead of the full frame. |
+| `output_height` | 0 | PPA resize height (0 = derive from `output_width` keeping the camera aspect ratio). |
 | `audio_sample_rate` | 16000 | Raw PCM rate over UDP. |
 | `ring_timeout` | 30s | Auto-hangup if unanswered. |
 | `auto_answer` | false | Intercom-style auto-pickup. |
@@ -564,11 +566,22 @@ on_...:
 - **Stutter** (face2face): video capture + JPEG encode + UDP send run in a
   dedicated FreeRTOS task pinned to core 1 (not the LVGL main loop), so the send
   rate actually tracks `framerate` and the main loop keeps draining the RX socket
-  (far fewer dropped fragments). If it still stutters, the shared HW JPEG engine
-  is the limit at high resolution: lower `framerate`, raise `scale`, or lower
-  `jpeg_quality` — in that order. The link meter ("C6 link: TX/RX kbps") tells you
-  whether you are bandwidth-bound (you usually are not — the JPEG engine and frame
-  pacing are the ceiling, not the WiFi).
+  (far fewer dropped fragments). The downscale before encode runs on the **PPA**
+  (2D-DMA hardware), not the CPU. If it still stutters:
+  1. Make sure you are not encoding the full sensor frame. With a 1280×720 sensor
+     and the default `scale`/`output_width` unset, face2face encodes **1280×720**
+     (~1.8 MB/frame) — set `output_width:` to your viewing width (e.g. `800`) so
+     the PPA shrinks it first. This is usually the single biggest win.
+  2. Then `framerate`, then `jpeg_quality`.
+
+  Why it is rarely the WiFi: the P4 has **one** HW JPEG engine that can only encode
+  *or* decode at a time (Espressif: *"at one time, the codec engine can only work
+  as either encoder or decoder"*), so a two-way call serialises encode+decode on
+  it, and every pixel op (camera DMA, PPA, JPEG) shares the **PSRAM bandwidth**
+  ("PPA performance highly relies on the PSRAM bandwidth"). At 1080p the engine
+  alone caps ~40 fps encode / ~48 fps decode → ~20 fps two-way; shrink the frame
+  and that ceiling shoots up. The "C6 link: TX/RX kbps" meter confirms you are
+  almost never bandwidth-bound.
 - **Faint call audio / weak wake-word**: set `fdaudio` `mic_agc: 10000`; enable
   the `amplifier:` switch in `face2face` so the PA is on during the call.
 - **Echo**: start with `enable_aec: true` and a little `echo_suppression:`; only

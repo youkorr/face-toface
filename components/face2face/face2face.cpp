@@ -29,6 +29,12 @@
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
+// ESP32-P4 Pixel-Processing Accelerator (PPA) -- hardware image scale/rotate/
+// mirror over the shared 2D-DMA. Used here to downscale the camera RGB565 frame
+// before the JPEG encode without a CPU pixel loop (built-in IDF component, same
+// API the esp_cam_sensor camera already uses).
+#include "driver/ppa.h"
+
 // Acoustic echo cancellation (Espressif ESP-SR). Only compiled when enabled in
 // YAML (enable_aec), which also pulls the esp-sr managed component.
 #ifdef FACE2FACE_USE_AEC
@@ -616,9 +622,55 @@ bool Face2Face::jpeg_init_() {
   // DMA buffers (enc_in_/enc_out_/dec_in_/dec_out_) are grown lazily to the
   // ACTUAL frame size in pump_video_tx_/decode_jpeg_, so any camera resolution
   // (e.g. 1280x720) works without matching width_/height_ in YAML.
+  // Register a PPA client for the hardware downscale (best-effort: if it fails
+  // we simply fall back to a CPU resize in pump_video_tx_).
+  if (ppa_client_ == nullptr) {
+    ppa_client_config_t pc = {};
+    pc.oper_type = PPA_OPERATION_SRM;
+    pc.max_pending_trans_num = 1;  // single blocking transaction at a time
+    esp_err_t pr = ppa_register_client(&pc, reinterpret_cast<ppa_client_handle_t *>(&ppa_client_));
+    if (pr != ESP_OK) {
+      ppa_client_ = nullptr;
+      ESP_LOGW(TAG, "PPA client register failed (%s); using CPU downscale", esp_err_to_name(pr));
+    } else {
+      ESP_LOGCONFIG(TAG, "PPA hardware scaler ready");
+    }
+  }
   jpeg_ready_ = true;
   ESP_LOGCONFIG(TAG, "Hardware JPEG codec ready");
   return true;
+}
+
+// Hardware RGB565 downscale on the PPA (2D-DMA). Mirrors the proven config used
+// by esp_cam_sensor's apply_ppa_transform_ for this IDF version.
+bool Face2Face::ppa_scale_rgb565_(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh) {
+  if (ppa_client_ == nullptr || src == nullptr || dst == nullptr)
+    return false;
+  ppa_srm_oper_config_t c = {};
+  c.in.buffer = const_cast<uint8_t *>(src);
+  c.in.pic_w = sw;
+  c.in.pic_h = sh;
+  c.in.block_w = sw;
+  c.in.block_h = sh;
+  c.in.block_offset_x = 0;
+  c.in.block_offset_y = 0;
+  c.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  c.out.buffer = dst;
+  c.out.buffer_size = (uint32_t) (dw * dh * 2);
+  c.out.pic_w = dw;
+  c.out.pic_h = dh;
+  c.out.block_offset_x = 0;
+  c.out.block_offset_y = 0;
+  c.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  c.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  c.scale_x = (float) dw / (float) sw;
+  c.scale_y = (float) dh / (float) sh;
+  c.mirror_x = false;
+  c.mirror_y = false;
+  c.rgb_swap = false;
+  c.byte_swap = false;
+  c.mode = PPA_TRANS_MODE_BLOCKING;
+  return ppa_do_scale_rotate_mirror(reinterpret_cast<ppa_client_handle_t>(ppa_client_), &c) == ESP_OK;
 }
 
 // Ensure a JPEG-encoder DMA buffer is at least `need` bytes (realloc if needed).
@@ -663,6 +715,10 @@ void Face2Face::jpeg_deinit_() {
   if (jpeg_dec_ != nullptr) {
     jpeg_del_decoder_engine(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_));
     jpeg_dec_ = nullptr;
+  }
+  if (ppa_client_ != nullptr) {
+    ppa_unregister_client(reinterpret_cast<ppa_client_handle_t>(ppa_client_));
+    ppa_client_ = nullptr;
   }
   if (enc_in_ != nullptr) { free(enc_in_); enc_in_ = nullptr; }
   if (enc_out_ != nullptr) { free(enc_out_); enc_out_ = nullptr; }
@@ -771,16 +827,28 @@ void Face2Face::pump_video_tx_() {
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
-  // Downscale by an integer factor (scale_) while copying into the encoder
-  // input buffer. A 1280x720 frame at scale 3 becomes 426x240 -> the JPEG is a
-  // few KB (a handful of UDP fragments) instead of ~100KB (dozens), which is
-  // what the WiFi-over-SDIO link can actually sustain.
-  int s = scale_ < 1 ? 1 : scale_;
-  int ow = w / s, oh = h / s;
-  // The hardware JPEG codec aligns dimensions to 16px. Round DOWN to a multiple
-  // of 16 on both sides so the encoder output and the peer's decoder output have
-  // the exact size we allocate (else decode fails: "buffer smaller than actual
-  // output size"). 426x240 -> 416x240, 400x400 -> 400x400.
+  // Decide the encoded frame size. Two modes:
+  //  - output_width_ > 0: resize the camera frame to ~output_width_ x derived
+  //    height (fractional, e.g. 1280x720 -> 800x448). This is the fps lever:
+  //    encode/send a small frame while keeping a chosen viewing resolution.
+  //  - else: legacy integer downscale by scale_ (1280x720 @scale3 -> 416x240).
+  // A small JPEG is a few KB (a handful of UDP fragments) instead of ~100KB
+  // (dozens), which is what the shared JPEG engine + C6 link actually sustain.
+  int ow, oh;
+  if (out_width_ > 0) {
+    ow = out_width_;
+    oh = out_height_ > 0 ? (int) out_height_ : (int) ((int64_t) out_width_ * h / w);
+  } else {
+    int s = scale_ < 1 ? 1 : scale_;
+    ow = w / s;
+    oh = h / s;
+  }
+  // Never upscale (PPA/JPEG cost + pointless), and the HW JPEG codec aligns
+  // dimensions to 16px. Clamp to the source, then round DOWN to a multiple of 16
+  // so the encoder output and the peer's decoder output match the size we
+  // allocate (else decode fails: "buffer smaller than actual output size").
+  if (ow > w) ow = w;
+  if (oh > h) oh = h;
   ow &= ~15;
   oh &= ~15;
   if (ow < 16 || oh < 16) { camera_->release_buffer(el); return; }
@@ -790,14 +858,24 @@ void Face2Face::pump_video_tx_() {
   if (have_input) {
     const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
     uint16_t *dst = reinterpret_cast<uint16_t *>(enc_in_);
-    if (s == 1) {
-      std::memcpy(dst, src, out_bytes);
-    } else {
-      for (int y = 0; y < oh; y++) {
-        const uint16_t *srow = src + (size_t) (y * s) * w;
-        uint16_t *drow = dst + (size_t) y * ow;
-        for (int x = 0; x < ow; x++)
-          drow[x] = srow[x * s];
+    bool scaled = false;
+    // Hardware path: let the PPA (2D-DMA) do the resize off the CPU. This is the
+    // big win -- the old strided CPU loop both burned the core and saturated the
+    // PSRAM bandwidth the JPEG engine needs.
+    if (ow != w || oh != h)
+      scaled = ppa_scale_rgb565_(rgb, w, h, enc_in_, ow, oh);
+    if (!scaled) {
+      if (ow == w && oh == h) {
+        std::memcpy(dst, src, out_bytes);  // no resize: straight copy
+      } else {
+        // CPU fallback (PPA unavailable/failed): nearest-neighbour resize that
+        // handles any ratio, not just integer scale_.
+        for (int y = 0; y < oh; y++) {
+          const uint16_t *srow = src + (size_t) ((int64_t) y * h / oh) * w;
+          uint16_t *drow = dst + (size_t) y * ow;
+          for (int x = 0; x < ow; x++)
+            drow[x] = srow[(int) ((int64_t) x * w / ow)];
+        }
       }
     }
   }

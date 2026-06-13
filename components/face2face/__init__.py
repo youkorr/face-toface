@@ -38,6 +38,8 @@ CONF_FRAMERATE = "framerate"
 CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_SWAP_COLORS = "swap_colors"
 CONF_SCALE = "scale"
+CONF_OUTPUT_WIDTH = "output_width"
+CONF_OUTPUT_HEIGHT = "output_height"
 CONF_ENABLE_AUDIO = "enable_audio"
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_RING_TIMEOUT = "ring_timeout"
@@ -112,6 +114,15 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
         cv.Optional(CONF_SWAP_COLORS, default=True): cv.boolean,
         cv.Optional(CONF_SCALE, default=3): cv.int_range(min=1, max=8),
+        # Hardware (PPA) downscale target. When output_width > 0 the camera frame
+        # is resized to output_width x output_height by the P4's Pixel-Processing
+        # Accelerator (2D-DMA) BEFORE the JPEG encode -- fractional scaling, off
+        # the CPU, and a much smaller frame to encode/send. This is the lever to
+        # raise fps while keeping a chosen viewing resolution (e.g. 1280x720 ->
+        # 800x448). output_height 0 = derive from width keeping the aspect ratio.
+        # Leave both 0 to keep the legacy integer `scale:` behaviour.
+        cv.Optional(CONF_OUTPUT_WIDTH, default=0): cv.int_range(min=0, max=1920),
+        cv.Optional(CONF_OUTPUT_HEIGHT, default=0): cv.int_range(min=0, max=1080),
         cv.Optional(CONF_ENABLE_AUDIO, default=True): cv.boolean,
         cv.Optional(CONF_AUDIO_SAMPLE_RATE, default=16000): cv.int_,
         cv.Optional(CONF_RING_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
@@ -141,6 +152,7 @@ async def to_code(config):
     cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
     cg.add(var.set_swap_colors(config[CONF_SWAP_COLORS]))
     cg.add(var.set_scale(config[CONF_SCALE]))
+    cg.add(var.set_output_size(config[CONF_OUTPUT_WIDTH], config[CONF_OUTPUT_HEIGHT]))
     cg.add(var.set_audio_enabled(config[CONF_ENABLE_AUDIO]))
     cg.add(var.set_audio_sample_rate(config[CONF_AUDIO_SAMPLE_RATE]))
     cg.add(var.set_ring_timeout(config[CONF_RING_TIMEOUT]))
