@@ -209,6 +209,18 @@ class Face2Face : public Component {
   void pump_video_tx_();
   bool decode_jpeg_(const uint8_t *jpeg, uint32_t len);
 
+  // Video-TX task: capture + downscale + HW-JPEG encode + UDP send run in a
+  // dedicated FreeRTOS task (not the main loop). This is what unlocks the frame
+  // rate: the ESPHome main loop is shared with LVGL (canvas redraw), WiFi, etc.
+  // and only ticks ~10-15 Hz, so running TX there capped the send rate AND
+  // stalled poll_receive_() during each encode/send -> dropped RX fragments ->
+  // 3-7 fps. With TX off the loop, the loop drains the RX socket continuously
+  // and the encode overlaps LVGL/decode on the other core. encode (this task)
+  // and decode (main loop) serialise on jpeg_mutex_ for the shared HW engine.
+  static void video_tx_task_(void *arg);
+  void start_video_tx_task_();
+  void stop_video_tx_task_();
+
   // lazy media resources: allocated on call start, freed on hangup so RAM/PSRAM
   // stay free while idle on the LVGL UI.
   bool ensure_media_();
@@ -303,9 +315,13 @@ class Face2Face : public Component {
   uint32_t last_tx_us_{0};
   uint32_t last_enc_warn_ms_{0};  // throttle encode-error logs (per-frame)
 
-  // JPEG codec mutex (kept harmless; TX encode and RX decode now both run in the
-  // main loop so it is never contended).
+  // JPEG codec mutex: serialises the video-TX task's encode with the main loop's
+  // decode on the single shared HW JPEG peripheral.
   SemaphoreHandle_t jpeg_mutex_{nullptr};
+
+  // Video-TX task handle + run flag (created on call start, joined on hangup).
+  TaskHandle_t tx_task_handle_{nullptr};
+  volatile bool tx_task_run_{false};
 
   // presence
   uint32_t last_peer_rx_ms_{0};

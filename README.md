@@ -561,8 +561,14 @@ on_...:
   (`CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=false`); the legacy I2C driver aborts at
   boot on IDF 5.4+ ("driver_ng is not allowed to be used with this old driver").
 - **`width`/`height`** must match the camera's RGB output, or add a resize.
-- **Stutter** (face2face): the shared JPEG engine is usually the limit. Lower
-  `framerate`, raise `scale`, or lower `jpeg_quality` — in that order.
+- **Stutter** (face2face): video capture + JPEG encode + UDP send run in a
+  dedicated FreeRTOS task pinned to core 1 (not the LVGL main loop), so the send
+  rate actually tracks `framerate` and the main loop keeps draining the RX socket
+  (far fewer dropped fragments). If it still stutters, the shared HW JPEG engine
+  is the limit at high resolution: lower `framerate`, raise `scale`, or lower
+  `jpeg_quality` — in that order. The link meter ("C6 link: TX/RX kbps") tells you
+  whether you are bandwidth-bound (you usually are not — the JPEG engine and frame
+  pacing are the ceiling, not the WiFi).
 - **Faint call audio / weak wake-word**: set `fdaudio` `mic_agc: 10000`; enable
   the `amplifier:` switch in `face2face` so the PA is on during the call.
 - **Echo**: start with `enable_aec: true` and a little `echo_suppression:`; only

@@ -144,16 +144,10 @@ void Face2Face::loop() {
     last_thru_ms_ = now_ms;
   }
 
-  // Send our video while streaming, rate-limited to framerate_ (in the main
-  // loop, like before: the loop feeds the WDT itself so it can't be starved).
-  if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
-    uint32_t now = micros();
-    uint32_t period = 1000000UL / framerate_;
-    if (now - last_tx_us_ >= period) {
-      last_tx_us_ = now;
-      pump_video_tx_();
-    }
-  }
+  // Video TX (capture + encode + send) now runs in its own FreeRTOS task
+  // (start_video_tx_task_), NOT here. The main loop stays light so it can drain
+  // the RX socket every iteration and redraw LVGL without being stalled by an
+  // encode/send -> far fewer dropped fragments and a much higher, steadier fps.
 }
 
 void Face2Face::dump_config() {
@@ -300,6 +294,8 @@ void Face2Face::start_streaming_() {
   if (audio_enabled_)
     audio_due_ms_ = millis() + audio_start_delay_ms_;
     audio_retries_ = 0;
+  // Start the dedicated video-TX task now that the camera + JPEG codec are up.
+  start_video_tx_task_();
   ESP_LOGI(TAG, "Call established (streaming)");
 }
 
@@ -323,6 +319,10 @@ void Face2Face::go_idle_() {
     if (spk_ != nullptr)
       spk_->stop();
   }
+  // Stop the video-TX task and wait for it to exit BEFORE we free the camera /
+  // JPEG codec it uses, otherwise release_media_() could free buffers from
+  // under an in-flight encode (use-after-free / crash).
+  stop_video_tx_task_();
   // Stop the camera if WE started it (frees its DMA frame buffers).
   if (camera_started_ && camera_ != nullptr) {
     camera_->stop_streaming();
@@ -408,7 +408,10 @@ bool Face2Face::open_sockets_() {
     }
     int flags = ::fcntl(sock, F_GETFL, 0);
     ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    int rxbuf = 65536;
+    // Video (i==0) bursts dozens of fragments per frame; a bigger RX buffer lets
+    // a whole frame (or several) sit in the kernel until poll_receive_ drains it,
+    // instead of overflowing and dropping fragments -> incomplete frames jettés.
+    int rxbuf = (i == 0) ? 196608 : 65536;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
     int txbuf = 65536;  // bigger TX buffer: a JPEG frame is dozens of fragments
     ::setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &txbuf, sizeof(txbuf));
@@ -699,6 +702,60 @@ void Face2Face::release_media_() {
   new_remote_frame_ = false;
   video_asm_ = FrameAssembler{};
   audio_asm_ = FrameAssembler{};
+}
+
+// Dedicated video-TX task. Pinned to core 1 so the heavy RGB->JPEG encode runs
+// off the core that carries the ESPHome main loop + LVGL + WiFi/SDIO, letting
+// the two overlap. Paces itself to framerate_ and always yields >=1 tick per
+// iteration so the idle task on this core still runs (no idle-WDT trip).
+void Face2Face::video_tx_task_(void *arg) {
+  auto *self = static_cast<Face2Face *>(arg);
+  // Subscribe to the task WDT (best-effort) so a slow camera frame is treated
+  // like the main loop's own feed instead of warning, then feed it each pass.
+  esp_task_wdt_add(nullptr);
+  while (self->tx_task_run_) {
+    esp_task_wdt_reset();
+    uint8_t fps = self->framerate_ ? self->framerate_ : 1;
+    uint32_t period_us = 1000000UL / fps;
+    uint32_t start_us = micros();
+    if (self->state_ == STATE_STREAMING && self->jpeg_ready_ && self->camera_ != nullptr) {
+      self->pump_video_tx_();
+    }
+    // Pace to the configured frame rate, yielding at least one tick so the idle
+    // task (and anything else on this core) gets to run between frames.
+    uint32_t elapsed_us = micros() - start_us;
+    uint32_t delay_us = elapsed_us < period_us ? period_us - elapsed_us : 0;
+    TickType_t ticks = pdMS_TO_TICKS(delay_us / 1000);
+    vTaskDelay(ticks > 0 ? ticks : 1);
+  }
+  esp_task_wdt_delete(nullptr);
+  self->tx_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void Face2Face::start_video_tx_task_() {
+  if (tx_task_handle_ != nullptr)
+    return;  // already running
+  tx_task_run_ = true;
+  // 8 KB stack (encode lives in IDF/DMA, little app stack needed); priority 6
+  // (above the idle/low tasks, below time-critical WiFi); core 1.
+  if (xTaskCreatePinnedToCore(&Face2Face::video_tx_task_, "f2f_vtx", 8192, this, 6,
+                              &tx_task_handle_, 1) != pdPASS) {
+    tx_task_handle_ = nullptr;
+    tx_task_run_ = false;
+    ESP_LOGE(TAG, "video TX task create failed (low memory?) - outgoing video disabled this call");
+  }
+}
+
+void Face2Face::stop_video_tx_task_() {
+  if (tx_task_handle_ == nullptr)
+    return;
+  tx_task_run_ = false;
+  // Wait for the task to finish its current frame and self-delete (it clears
+  // tx_task_handle_ on exit). Bounded so a wedged task can't hang hangup.
+  for (int i = 0; i < 100 && tx_task_handle_ != nullptr; i++)
+    vTaskDelay(pdMS_TO_TICKS(5));
+  tx_task_handle_ = nullptr;
 }
 
 void Face2Face::pump_video_tx_() {
