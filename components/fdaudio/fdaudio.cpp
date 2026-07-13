@@ -68,11 +68,32 @@ bool FdAudio::init_i2s_() {
   if (i2s_ready_)
     return true;
 
+  // If a previous attempt failed part-way (e.g. DMA buffer allocation failed
+  // because internal SRAM was momentarily exhausted), the channel handles must
+  // be RELEASED before retrying: they stay registered on the controller, and
+  // the next i2s_new_channel() would fail forever with "no available channel
+  // found" even once memory is back.
+  auto release_channels = [this]() {
+    if (tx_chan_ != nullptr) {
+      i2s_channel_disable(tx_chan_);  // no-op/error if not enabled; ignore
+      i2s_del_channel(tx_chan_);
+      tx_chan_ = nullptr;
+    }
+    if (rx_chan_ != nullptr) {
+      i2s_channel_disable(rx_chan_);
+      i2s_del_channel(rx_chan_);
+      rx_chan_ = nullptr;
+    }
+  };
+  release_channels();  // clean slate if an old partial attempt left handles
+
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.auto_clear = true;
   // Both handles non-NULL => full-duplex on the same port.
   if (i2s_new_channel(&chan_cfg, &tx_chan_, &rx_chan_) != ESP_OK) {
     ESP_LOGE(TAG, "i2s_new_channel (duplex) failed");
+    tx_chan_ = nullptr;
+    rx_chan_ = nullptr;
     return false;
   }
 
@@ -89,15 +110,18 @@ bool FdAudio::init_i2s_() {
       },
   };
   if (i2s_channel_init_std_mode(tx_chan_, &std_cfg) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s tx init_std failed");
+    ESP_LOGE(TAG, "i2s tx init_std failed (freeing channels for retry)");
+    release_channels();
     return false;
   }
   if (i2s_channel_init_std_mode(rx_chan_, &std_cfg) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s rx init_std failed");
+    ESP_LOGE(TAG, "i2s rx init_std failed (freeing channels for retry)");
+    release_channels();
     return false;
   }
   if (i2s_channel_enable(tx_chan_) != ESP_OK || i2s_channel_enable(rx_chan_) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s channel enable failed");
+    ESP_LOGE(TAG, "i2s channel enable failed (freeing channels for retry)");
+    release_channels();
     return false;
   }
   i2s_ready_ = true;
@@ -424,6 +448,9 @@ bool FdAudio::engine_start() {
   if (running_)
     return true;
   if (!init_i2s_() || !init_codecs_()) {
+    // Roll the refcount back so a later retry (e.g. micro_wake_word restarting
+    // the mic) starts from a balanced count and engine_stop can still idle.
+    consumers_--;
     ESP_LOGE(TAG, "engine_start failed");
     return false;
   }
