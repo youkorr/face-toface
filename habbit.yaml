@@ -220,8 +220,17 @@ external_components:
       type: git
       url: https://github.com/youkorr/test2_esp_video_esphome
       ref: main #claude/add-webp-storage-support-BtuK2  #claude/gracious-ride-lqF8Q   #claude/confident-maxwell-Sx6bM #claude/fix-coco-detection-esp32-DKktc #claude/fix-cache-line-size-8vT5R #claude/fix-coco-detection-esp32-DKktc #claude/yolo-esp32-camera-support-Ian86  #claude/fix-camera-h264-Grgbl #claude/yolo-esp32-camera-support-Ian86 #claude/add-webp-storage-support-BtuK2 #claude/usb-media-storage-zNT22 #claude/fix-mp4-stuttering-QWMcU #claude/fix-esphome-ff-header-LUVh2  #claude/optimize-face-detection-memory-0mKRM #claude/decouple-esp-video-Hr7PK
-    components: [sd_mmc_card, webdavbox3, storage, esp_video, esp_cam_sensor, lvgl_camera_display]
-    refresh: always 
+    components: [sd_mmc_card, webdavbox3, storage]
+    refresh: always
+  # Composants vidéo tirés de esphome_esp-video : contient le correctif couleurs
+  # SC202CS (CCM ~5000K) ET le support USB-UVC, mergés sur main. esp_ipa /
+  # esp_sccb_intf sont fournis comme dépôts frères dans ce même clone.
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: main
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: always
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
@@ -245,9 +254,14 @@ face2face:
   enable_aec: true
   aec_mode: voip_high_perf
   aec_filter_length: 4
-  width: 800                     # borne mémoire = sortie caméra (800x800)
+  width: 800                     # borne mémoire initiale du framebuffer distant
   height: 800
-  framerate: 12
+  # Downscale MATÉRIEL (PPA / 2D-DMA) : la caméra sort du 1280x720, on encode et
+  # on envoie du ~800x448 au lieu de la pleine frame -> bien plus fluide, sans
+  # charger le CPU ni voler la bande passante PSRAM au moteur JPEG. 0 = désactivé
+  # (on retombe sur le `scale` entier). 800 = la résolution de visualisation visée.
+  output_width: 800
+  framerate: 20                  # plus de marge maintenant que la frame est légère
   jpeg_quality: 35
   on_ringing:
     - lvgl.widget.show: incoming_overlay
@@ -343,6 +357,7 @@ esp_video:
   xclk_freq: 24000000
   enable_jpeg: true
   enable_isp: true
+  enable_uvc: true          # caméra USB externe (UVC) sur le port USB-OTG du P4
   use_heap_allocator: false
 
 # ============================================================================
@@ -955,10 +970,13 @@ interval:
             #- lvgl.image.update:
                 #id: animation_widget
                 #src: img_animation_active
-  - interval: 80ms
+  # Push de la vidéo distante : 33 ms = jusqu'à ~30 fps à l'écran. C'EST le
+  # plafond d'affichage -- à 80 ms on ne voyait que 12,5 fps quelle que soit la
+  # vitesse d'arrivée des frames. has_new_remote_frame() ne redessine que s'il y
+  # a vraiment une nouvelle image (zéro redraw inutile).
+  - interval: 33ms
     then:
       - lambda: |-
-          // a) pousser la dernière image distante dans le canvas plein écran
           if (id(f2f).has_new_remote_frame()) {
             const uint8_t *rgb = id(f2f).remote_rgb565();
             if (rgb != nullptr) {
@@ -968,7 +986,11 @@ interval:
               lv_obj_invalidate(id(remote_video));
             }
           }
-          // b) pastille + texte de présence (vert = en ligne, gris = hors ligne)
+  # Présence : 1 Hz suffit (pastille verte/grise + texte). Inutile de recalculer
+  # ces chaînes 30x/s comme quand c'était dans la boucle vidéo à 80 ms.
+  - interval: 1s
+    then:
+      - lambda: |-
           bool on = id(f2f).peer_online();
           lv_obj_set_style_bg_color(id(presence_dot),
               lv_color_hex(on ? 0x22C55E : 0x64748B), 0);

@@ -46,10 +46,13 @@ binary_sensor:
 
 # --- 3) Boucle de rafraîchissement : vidéo + indicateur de présence ---------
 interval:
-  - interval: 80ms
+  # Vidéo distante : 33 ms = jusqu'à ~30 fps affichés. C'est le plafond
+  # d'affichage -- à 80 ms l'écran ne montrait que 12,5 fps même si les frames
+  # arrivaient plus vite. has_new_remote_frame() ne redessine que s'il y a une
+  # nouvelle image, donc aucun redraw inutile entre deux frames.
+  - interval: 33ms
     then:
       - lambda: |-
-          // a) pousser la dernière image distante dans le canvas plein écran
           if (id(f2f).has_new_remote_frame()) {
             const uint8_t *rgb = id(f2f).remote_rgb565();
             if (rgb != nullptr) {
@@ -59,7 +62,10 @@ interval:
               lv_obj_invalidate(id(remote_video));
             }
           }
-          // b) pastille + texte de présence (vert = en ligne, gris = hors ligne)
+  # Présence (pastille verte/grise + texte) : 1 Hz suffit largement.
+  - interval: 1s
+    then:
+      - lambda: |-
           bool on = id(f2f).peer_online();
           lv_obj_set_style_bg_color(id(presence_dot),
               lv_color_hex(on ? 0x22C55E : 0x64748B), 0);

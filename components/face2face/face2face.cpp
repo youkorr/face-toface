@@ -29,6 +29,12 @@
 #include "driver/jpeg_encode.h"
 #include "driver/jpeg_decode.h"
 
+// ESP32-P4 Pixel-Processing Accelerator (PPA) -- hardware image scale/rotate/
+// mirror over the shared 2D-DMA. Used here to downscale the camera RGB565 frame
+// before the JPEG encode without a CPU pixel loop (built-in IDF component, same
+// API the esp_cam_sensor camera already uses).
+#include "driver/ppa.h"
+
 // Acoustic echo cancellation (Espressif ESP-SR). Only compiled when enabled in
 // YAML (enable_aec), which also pulls the esp-sr managed component.
 #ifdef FACE2FACE_USE_AEC
@@ -83,6 +89,15 @@ void Face2Face::loop() {
     return;
 
   poll_receive_();
+
+  // Decode only the most recent video frame received this iteration (the recv
+  // path just stashes the latest JPEG). One decode per loop on the shared HW
+  // engine; older frames in the same burst are skipped on purpose.
+  if (pending_jpeg_ready_) {
+    pending_jpeg_ready_ = false;
+    if (decode_jpeg_(pending_jpeg_.data(), pending_jpeg_len_))
+      new_remote_frame_ = true;
+  }
 
   uint32_t now_ms = millis();
 
@@ -144,16 +159,10 @@ void Face2Face::loop() {
     last_thru_ms_ = now_ms;
   }
 
-  // Send our video while streaming, rate-limited to framerate_ (in the main
-  // loop, like before: the loop feeds the WDT itself so it can't be starved).
-  if (state_ == STATE_STREAMING && jpeg_ready_ && camera_ != nullptr) {
-    uint32_t now = micros();
-    uint32_t period = 1000000UL / framerate_;
-    if (now - last_tx_us_ >= period) {
-      last_tx_us_ = now;
-      pump_video_tx_();
-    }
-  }
+  // Video TX (capture + encode + send) now runs in its own FreeRTOS task
+  // (start_video_tx_task_), NOT here. The main loop stays light so it can drain
+  // the RX socket every iteration and redraw LVGL without being stalled by an
+  // encode/send -> far fewer dropped fragments and a much higher, steadier fps.
 }
 
 void Face2Face::dump_config() {
@@ -300,6 +309,8 @@ void Face2Face::start_streaming_() {
   if (audio_enabled_)
     audio_due_ms_ = millis() + audio_start_delay_ms_;
     audio_retries_ = 0;
+  // Start the dedicated video-TX task now that the camera + JPEG codec are up.
+  start_video_tx_task_();
   ESP_LOGI(TAG, "Call established (streaming)");
 }
 
@@ -323,6 +334,10 @@ void Face2Face::go_idle_() {
     if (spk_ != nullptr)
       spk_->stop();
   }
+  // Stop the video-TX task and wait for it to exit BEFORE we free the camera /
+  // JPEG codec it uses, otherwise release_media_() could free buffers from
+  // under an in-flight encode (use-after-free / crash).
+  stop_video_tx_task_();
   // Stop the camera if WE started it (frees its DMA frame buffers).
   if (camera_started_ && camera_ != nullptr) {
     camera_->stop_streaming();
@@ -408,7 +423,10 @@ bool Face2Face::open_sockets_() {
     }
     int flags = ::fcntl(sock, F_GETFL, 0);
     ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    int rxbuf = 65536;
+    // Video (i==0) bursts dozens of fragments per frame; a bigger RX buffer lets
+    // a whole frame (or several) sit in the kernel until poll_receive_ drains it,
+    // instead of overflowing and dropping fragments -> incomplete frames jettés.
+    int rxbuf = (i == 0) ? 196608 : 65536;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
     int txbuf = 65536;  // bigger TX buffer: a JPEG frame is dozens of fragments
     ::setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &txbuf, sizeof(txbuf));
@@ -587,8 +605,15 @@ void Face2Face::handle_packet_(const uint8_t *buf, size_t len, F2FStream expecte
   asmb.active = false;
 
   if (expected == F2F_STREAM_VIDEO) {
-    if (decode_jpeg_(asmb.data.data(), asmb.frame_size))
-      new_remote_frame_ = true;
+    // Don't decode here: several frames can complete in one poll_receive_ burst
+    // and only the newest is ever shown. Stash the latest JPEG (zero-copy swap)
+    // and decode exactly one -- the freshest -- per loop(), so the shared HW
+    // JPEG engine isn't burned re-decoding frames we'd immediately overwrite,
+    // and latency stays low. Decoding off the recv path also keeps draining the
+    // socket (fewer dropped fragments).
+    std::swap(pending_jpeg_, asmb.data);
+    pending_jpeg_len_ = asmb.frame_size;
+    pending_jpeg_ready_ = true;
   } else {
     play_audio_(asmb.data.data(), asmb.frame_size);
   }
@@ -613,9 +638,55 @@ bool Face2Face::jpeg_init_() {
   // DMA buffers (enc_in_/enc_out_/dec_in_/dec_out_) are grown lazily to the
   // ACTUAL frame size in pump_video_tx_/decode_jpeg_, so any camera resolution
   // (e.g. 1280x720) works without matching width_/height_ in YAML.
+  // Register a PPA client for the hardware downscale (best-effort: if it fails
+  // we simply fall back to a CPU resize in pump_video_tx_).
+  if (ppa_client_ == nullptr) {
+    ppa_client_config_t pc = {};
+    pc.oper_type = PPA_OPERATION_SRM;
+    pc.max_pending_trans_num = 1;  // single blocking transaction at a time
+    esp_err_t pr = ppa_register_client(&pc, reinterpret_cast<ppa_client_handle_t *>(&ppa_client_));
+    if (pr != ESP_OK) {
+      ppa_client_ = nullptr;
+      ESP_LOGW(TAG, "PPA client register failed (%s); using CPU downscale", esp_err_to_name(pr));
+    } else {
+      ESP_LOGCONFIG(TAG, "PPA hardware scaler ready");
+    }
+  }
   jpeg_ready_ = true;
   ESP_LOGCONFIG(TAG, "Hardware JPEG codec ready");
   return true;
+}
+
+// Hardware RGB565 downscale on the PPA (2D-DMA). Mirrors the proven config used
+// by esp_cam_sensor's apply_ppa_transform_ for this IDF version.
+bool Face2Face::ppa_scale_rgb565_(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh) {
+  if (ppa_client_ == nullptr || src == nullptr || dst == nullptr)
+    return false;
+  ppa_srm_oper_config_t c = {};
+  c.in.buffer = const_cast<uint8_t *>(src);
+  c.in.pic_w = sw;
+  c.in.pic_h = sh;
+  c.in.block_w = sw;
+  c.in.block_h = sh;
+  c.in.block_offset_x = 0;
+  c.in.block_offset_y = 0;
+  c.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  c.out.buffer = dst;
+  c.out.buffer_size = (uint32_t) (dw * dh * 2);
+  c.out.pic_w = dw;
+  c.out.pic_h = dh;
+  c.out.block_offset_x = 0;
+  c.out.block_offset_y = 0;
+  c.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  c.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  c.scale_x = (float) dw / (float) sw;
+  c.scale_y = (float) dh / (float) sh;
+  c.mirror_x = false;
+  c.mirror_y = false;
+  c.rgb_swap = false;
+  c.byte_swap = false;
+  c.mode = PPA_TRANS_MODE_BLOCKING;
+  return ppa_do_scale_rotate_mirror(reinterpret_cast<ppa_client_handle_t>(ppa_client_), &c) == ESP_OK;
 }
 
 // Ensure a JPEG-encoder DMA buffer is at least `need` bytes (realloc if needed).
@@ -661,6 +732,10 @@ void Face2Face::jpeg_deinit_() {
     jpeg_del_decoder_engine(reinterpret_cast<jpeg_decoder_handle_t>(jpeg_dec_));
     jpeg_dec_ = nullptr;
   }
+  if (ppa_client_ != nullptr) {
+    ppa_unregister_client(reinterpret_cast<ppa_client_handle_t>(ppa_client_));
+    ppa_client_ = nullptr;
+  }
   if (enc_in_ != nullptr) { free(enc_in_); enc_in_ = nullptr; }
   if (enc_out_ != nullptr) { free(enc_out_); enc_out_ = nullptr; }
   if (dec_in_ != nullptr) { free(dec_in_); dec_in_ = nullptr; }
@@ -699,6 +774,63 @@ void Face2Face::release_media_() {
   new_remote_frame_ = false;
   video_asm_ = FrameAssembler{};
   audio_asm_ = FrameAssembler{};
+  std::vector<uint8_t>().swap(pending_jpeg_);
+  pending_jpeg_len_ = 0;
+  pending_jpeg_ready_ = false;
+}
+
+// Dedicated video-TX task. Pinned to core 1 so the heavy RGB->JPEG encode runs
+// off the core that carries the ESPHome main loop + LVGL + WiFi/SDIO, letting
+// the two overlap. Paces itself to framerate_ and always yields >=1 tick per
+// iteration so the idle task on this core still runs (no idle-WDT trip).
+void Face2Face::video_tx_task_(void *arg) {
+  auto *self = static_cast<Face2Face *>(arg);
+  // Subscribe to the task WDT (best-effort) so a slow camera frame is treated
+  // like the main loop's own feed instead of warning, then feed it each pass.
+  esp_task_wdt_add(nullptr);
+  while (self->tx_task_run_) {
+    esp_task_wdt_reset();
+    uint8_t fps = self->framerate_ ? self->framerate_ : 1;
+    uint32_t period_us = 1000000UL / fps;
+    uint32_t start_us = micros();
+    if (self->state_ == STATE_STREAMING && self->jpeg_ready_ && self->camera_ != nullptr) {
+      self->pump_video_tx_();
+    }
+    // Pace to the configured frame rate, yielding at least one tick so the idle
+    // task (and anything else on this core) gets to run between frames.
+    uint32_t elapsed_us = micros() - start_us;
+    uint32_t delay_us = elapsed_us < period_us ? period_us - elapsed_us : 0;
+    TickType_t ticks = pdMS_TO_TICKS(delay_us / 1000);
+    vTaskDelay(ticks > 0 ? ticks : 1);
+  }
+  esp_task_wdt_delete(nullptr);
+  self->tx_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void Face2Face::start_video_tx_task_() {
+  if (tx_task_handle_ != nullptr)
+    return;  // already running
+  tx_task_run_ = true;
+  // 8 KB stack (encode lives in IDF/DMA, little app stack needed); priority 6
+  // (above the idle/low tasks, below time-critical WiFi); core 1.
+  if (xTaskCreatePinnedToCore(&Face2Face::video_tx_task_, "f2f_vtx", 8192, this, 6,
+                              &tx_task_handle_, 1) != pdPASS) {
+    tx_task_handle_ = nullptr;
+    tx_task_run_ = false;
+    ESP_LOGE(TAG, "video TX task create failed (low memory?) - outgoing video disabled this call");
+  }
+}
+
+void Face2Face::stop_video_tx_task_() {
+  if (tx_task_handle_ == nullptr)
+    return;
+  tx_task_run_ = false;
+  // Wait for the task to finish its current frame and self-delete (it clears
+  // tx_task_handle_ on exit). Bounded so a wedged task can't hang hangup.
+  for (int i = 0; i < 100 && tx_task_handle_ != nullptr; i++)
+    vTaskDelay(pdMS_TO_TICKS(5));
+  tx_task_handle_ = nullptr;
 }
 
 void Face2Face::pump_video_tx_() {
@@ -714,16 +846,28 @@ void Face2Face::pump_video_tx_() {
   if (!camera_->get_current_rgb_frame(&el, &rgb, &w, &h) || rgb == nullptr)
     return;
 
-  // Downscale by an integer factor (scale_) while copying into the encoder
-  // input buffer. A 1280x720 frame at scale 3 becomes 426x240 -> the JPEG is a
-  // few KB (a handful of UDP fragments) instead of ~100KB (dozens), which is
-  // what the WiFi-over-SDIO link can actually sustain.
-  int s = scale_ < 1 ? 1 : scale_;
-  int ow = w / s, oh = h / s;
-  // The hardware JPEG codec aligns dimensions to 16px. Round DOWN to a multiple
-  // of 16 on both sides so the encoder output and the peer's decoder output have
-  // the exact size we allocate (else decode fails: "buffer smaller than actual
-  // output size"). 426x240 -> 416x240, 400x400 -> 400x400.
+  // Decide the encoded frame size. Two modes:
+  //  - output_width_ > 0: resize the camera frame to ~output_width_ x derived
+  //    height (fractional, e.g. 1280x720 -> 800x448). This is the fps lever:
+  //    encode/send a small frame while keeping a chosen viewing resolution.
+  //  - else: legacy integer downscale by scale_ (1280x720 @scale3 -> 416x240).
+  // A small JPEG is a few KB (a handful of UDP fragments) instead of ~100KB
+  // (dozens), which is what the shared JPEG engine + C6 link actually sustain.
+  int ow, oh;
+  if (out_width_ > 0) {
+    ow = out_width_;
+    oh = out_height_ > 0 ? (int) out_height_ : (int) ((int64_t) out_width_ * h / w);
+  } else {
+    int s = scale_ < 1 ? 1 : scale_;
+    ow = w / s;
+    oh = h / s;
+  }
+  // Never upscale (PPA/JPEG cost + pointless), and the HW JPEG codec aligns
+  // dimensions to 16px. Clamp to the source, then round DOWN to a multiple of 16
+  // so the encoder output and the peer's decoder output match the size we
+  // allocate (else decode fails: "buffer smaller than actual output size").
+  if (ow > w) ow = w;
+  if (oh > h) oh = h;
   ow &= ~15;
   oh &= ~15;
   if (ow < 16 || oh < 16) { camera_->release_buffer(el); return; }
@@ -733,14 +877,24 @@ void Face2Face::pump_video_tx_() {
   if (have_input) {
     const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
     uint16_t *dst = reinterpret_cast<uint16_t *>(enc_in_);
-    if (s == 1) {
-      std::memcpy(dst, src, out_bytes);
-    } else {
-      for (int y = 0; y < oh; y++) {
-        const uint16_t *srow = src + (size_t) (y * s) * w;
-        uint16_t *drow = dst + (size_t) y * ow;
-        for (int x = 0; x < ow; x++)
-          drow[x] = srow[x * s];
+    bool scaled = false;
+    // Hardware path: let the PPA (2D-DMA) do the resize off the CPU. This is the
+    // big win -- the old strided CPU loop both burned the core and saturated the
+    // PSRAM bandwidth the JPEG engine needs.
+    if (ow != w || oh != h)
+      scaled = ppa_scale_rgb565_(rgb, w, h, enc_in_, ow, oh);
+    if (!scaled) {
+      if (ow == w && oh == h) {
+        std::memcpy(dst, src, out_bytes);  // no resize: straight copy
+      } else {
+        // CPU fallback (PPA unavailable/failed): nearest-neighbour resize that
+        // handles any ratio, not just integer scale_.
+        for (int y = 0; y < oh; y++) {
+          const uint16_t *srow = src + (size_t) ((int64_t) y * h / oh) * w;
+          uint16_t *drow = dst + (size_t) y * ow;
+          for (int x = 0; x < ow; x++)
+            drow[x] = srow[(int) ((int64_t) x * w / ow)];
+        }
       }
     }
   }

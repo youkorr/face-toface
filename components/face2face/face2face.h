@@ -121,6 +121,9 @@ class Face2Face : public Component {
   void set_framerate(uint8_t fps) { framerate_ = fps; }
   void set_jpeg_quality(uint8_t q) { jpeg_quality_ = q; }
   void set_scale(uint8_t s) { scale_ = s < 1 ? 1 : s; }
+  // Hardware (PPA) downscale target. w>0 enables it; h==0 derives from the
+  // camera aspect ratio. Takes precedence over the integer scale_ when w>0.
+  void set_output_size(uint16_t w, uint16_t h) { out_width_ = w; out_height_ = h; }
   void set_swap_colors(bool s) { swap_colors_ = s; }
   void set_audio_enabled(bool e) { audio_enabled_ = e; }
   void set_audio_sample_rate(uint32_t r) { audio_sample_rate_ = r; }
@@ -209,6 +212,25 @@ class Face2Face : public Component {
   void pump_video_tx_();
   bool decode_jpeg_(const uint8_t *jpeg, uint32_t len);
 
+  // Hardware pixel scaling via the P4's PPA (2D-DMA). Downscales an RGB565
+  // source into dst on the JPEG/PPA accelerator instead of a CPU pixel loop,
+  // which both frees the CPU and stops stealing PSRAM bandwidth from the JPEG
+  // engine. Returns false (caller falls back to a CPU resize) if the PPA is
+  // unavailable or the transaction fails. Registered/freed with the JPEG codec.
+  bool ppa_scale_rgb565_(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh);
+
+  // Video-TX task: capture + downscale + HW-JPEG encode + UDP send run in a
+  // dedicated FreeRTOS task (not the main loop). This is what unlocks the frame
+  // rate: the ESPHome main loop is shared with LVGL (canvas redraw), WiFi, etc.
+  // and only ticks ~10-15 Hz, so running TX there capped the send rate AND
+  // stalled poll_receive_() during each encode/send -> dropped RX fragments ->
+  // 3-7 fps. With TX off the loop, the loop drains the RX socket continuously
+  // and the encode overlaps LVGL/decode on the other core. encode (this task)
+  // and decode (main loop) serialise on jpeg_mutex_ for the shared HW engine.
+  static void video_tx_task_(void *arg);
+  void start_video_tx_task_();
+  void stop_video_tx_task_();
+
   // lazy media resources: allocated on call start, freed on hangup so RAM/PSRAM
   // stay free while idle on the LVGL UI.
   bool ensure_media_();
@@ -251,6 +273,8 @@ class Face2Face : public Component {
   uint8_t framerate_{15};
   uint8_t jpeg_quality_{40};
   uint8_t scale_{1};  // downscale factor before JPEG encode (1,2,3,4...)
+  uint16_t out_width_{0};   // PPA hardware resize target width (0 = use scale_)
+  uint16_t out_height_{0};  // PPA resize height (0 = derive from camera aspect)
   bool swap_colors_{true};  // byte-swap RGB565 (HW JPEG decoder vs LVGL order)
   bool audio_enabled_{true};
   uint32_t audio_sample_rate_{16000};
@@ -303,9 +327,13 @@ class Face2Face : public Component {
   uint32_t last_tx_us_{0};
   uint32_t last_enc_warn_ms_{0};  // throttle encode-error logs (per-frame)
 
-  // JPEG codec mutex (kept harmless; TX encode and RX decode now both run in the
-  // main loop so it is never contended).
+  // JPEG codec mutex: serialises the video-TX task's encode with the main loop's
+  // decode on the single shared HW JPEG peripheral.
   SemaphoreHandle_t jpeg_mutex_{nullptr};
+
+  // Video-TX task handle + run flag (created on call start, joined on hangup).
+  TaskHandle_t tx_task_handle_{nullptr};
+  volatile bool tx_task_run_{false};
 
   // presence
   uint32_t last_peer_rx_ms_{0};
@@ -314,6 +342,11 @@ class Face2Face : public Component {
 
   FrameAssembler video_asm_;
   FrameAssembler audio_asm_;
+
+  // Latest fully-received video JPEG, decoded once per loop() (newest wins).
+  std::vector<uint8_t> pending_jpeg_;
+  uint32_t pending_jpeg_len_{0};
+  bool pending_jpeg_ready_{false};
 
   std::vector<uint8_t> remote_fb_;
   uint16_t remote_w_{0};
@@ -346,6 +379,7 @@ class Face2Face : public Component {
   // hardware JPEG handles + DMA buffers
   void *jpeg_enc_{nullptr};
   void *jpeg_dec_{nullptr};
+  void *ppa_client_{nullptr};  // PPA SRM client for hardware downscale (per-call)
   uint8_t *enc_in_{nullptr};
   size_t enc_in_cap_{0};
   uint8_t *enc_out_{nullptr};
