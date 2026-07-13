@@ -130,6 +130,16 @@ async def to_code(config):
     esp32.add_idf_component(name="espressif/esp_codec_dev", ref="1.5.4")
     esp32.add_idf_sdkconfig_option("CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE", False)
 
+    # Force the I2S driver's control structures into INTERNAL RAM. The i2s
+    # driver allocates its channel object with MALLOC_CAP_DEFAULT; on builds
+    # where default mallocs may land in PSRAM, gdma (when compiled with
+    # CONFIG_GDMA_ISR_IRAM_SAFE, as video/LCD stacks do) then rejects it at
+    # channel init: "gdma: user context not in internal RAM" ->
+    # "i2s tx init_std failed". I2S_ISR_IRAM_SAFE switches those allocations
+    # to MALLOC_CAP_INTERNAL and puts the I2S ISR in IRAM, which is also the
+    # safe pairing whenever GDMA_ISR_IRAM_SAFE is enabled elsewhere.
+    esp32.add_idf_sdkconfig_option("CONFIG_I2S_ISR_IRAM_SAFE", True)
+
     if config[CONF_ENABLE_AEC] or config[CONF_USE_AFE]:
         # esp-sr master depends on esp-dsp 1.8.0 (matches the project override
         # 'espressif/esp-dsp==1.8.0' and esp-dl >=1.7.0). Pulls both the simple
