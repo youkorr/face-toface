@@ -146,11 +146,17 @@ bool FdAudio::init_codecs_() {
   out_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *out_ctrl = audio_codec_new_i2c_ctrl(&out_i2c);
 
+  // When the board has no ES7210, the output codec digitises the microphone
+  // too, so it must be opened in duplex rather than DAC-only.
+  const bool mic_on_output_codec = mic_source_ == MIC_FROM_OUTPUT_CODEC;
+  const esp_codec_dev_work_mode_t out_mode =
+      mic_on_output_codec ? ESP_CODEC_DEV_WORK_MODE_BOTH : ESP_CODEC_DEV_WORK_MODE_DAC;
+
   if (out_codec_ == OUT_ES8311) {
     es8311_codec_cfg_t cfg = {};
     cfg.ctrl_if = out_ctrl;
     cfg.gpio_if = (const audio_codec_gpio_if_t *) gpio_if_;
-    cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+    cfg.codec_mode = out_mode;
     cfg.use_mclk = use_mclk_;
     cfg.pa_pin = -1;
     out_codec_if_ = (void *) es8311_codec_new(&cfg);
@@ -158,7 +164,7 @@ bool FdAudio::init_codecs_() {
     es8388_codec_cfg_t cfg = {};
     cfg.ctrl_if = out_ctrl;
     cfg.gpio_if = (const audio_codec_gpio_if_t *) gpio_if_;
-    cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+    cfg.codec_mode = out_mode;
     cfg.master_mode = false;
     cfg.pa_pin = -1;
     out_codec_if_ = (void *) es8388_codec_new(&cfg);
@@ -169,12 +175,20 @@ bool FdAudio::init_codecs_() {
   }
 
   esp_codec_dev_cfg_t out_dev_cfg = {};
-  out_dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_OUT;
+  out_dev_cfg.dev_type = mic_on_output_codec ? ESP_CODEC_DEV_TYPE_IN_OUT : ESP_CODEC_DEV_TYPE_OUT;
   out_dev_cfg.codec_if = (const audio_codec_if_t *) out_codec_if_;
   out_dev_cfg.data_if = (const audio_codec_data_if_t *) data_if_;
   out_dev_ = esp_codec_dev_new(&out_dev_cfg);
 
+  if (mic_on_output_codec) {
+    // One duplex handle serves both directions. `shared_dev_` stops the
+    // teardown from closing and deleting it twice.
+    in_dev_ = out_dev_;
+    shared_dev_ = true;
+  }
+
   // --- Mic codec ES7210 (I2C) ---
+  if (!mic_on_output_codec) {
   audio_codec_i2c_cfg_t in_i2c = {};
   in_i2c.port = (uint8_t) i2c_port_;
   in_i2c.addr = in_addr8;
@@ -193,7 +207,13 @@ bool FdAudio::init_codecs_() {
   ESP_LOGI(TAG, "ES7210 mic_selected bitmask=0x%02X", mic_channels_);
   in_codec_if_ = (void *) es7210_codec_new(&mic_cfg);
   if (in_codec_if_ == nullptr) {
-    ESP_LOGE(TAG, "ES7210 codec new failed");
+    // Almost always "there is no ES7210 on this bus". Name the fix, because the
+    // symptom -- no audio at all, since this failure also takes the speaker
+    // down with it -- says nothing about the cause.
+    ESP_LOGE(TAG,
+             "ES7210 codec new failed at I2C 0x%02X. If your board has no ES7210 (check the bus scan: "
+             "no device at 0x40), set 'mic_source: output_codec' to capture through the %s instead.",
+             in_addr_, out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388");
     return false;
   }
 
@@ -202,6 +222,7 @@ bool FdAudio::init_codecs_() {
   in_dev_cfg.codec_if = (const audio_codec_if_t *) in_codec_if_;
   in_dev_cfg.data_if = (const audio_codec_data_if_t *) data_if_;
   in_dev_ = esp_codec_dev_new(&in_dev_cfg);
+  }
 
   if (out_dev_ == nullptr || in_dev_ == nullptr) {
     ESP_LOGE(TAG, "esp_codec_dev_new failed");
@@ -216,11 +237,13 @@ bool FdAudio::init_codecs_() {
   fs.channel = 1;
   fs.sample_rate = codec_rate_;
   esp_codec_dev_open((esp_codec_dev_handle_t) out_dev_, &fs);
-  esp_codec_dev_open((esp_codec_dev_handle_t) in_dev_, &fs);
+  if (!shared_dev_)
+    esp_codec_dev_open((esp_codec_dev_handle_t) in_dev_, &fs);
   esp_codec_dev_set_out_vol((esp_codec_dev_handle_t) out_dev_, out_volume_);
   esp_codec_dev_set_in_gain((esp_codec_dev_handle_t) in_dev_, mic_gain_db_);
 
-  ESP_LOGI(TAG, "Codecs ready (%s out + ES7210 in)", out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388");
+  ESP_LOGI(TAG, "Codecs ready (%s out + %s in)", out_codec_ == OUT_ES8311 ? "ES8311" : "ES8388",
+           mic_on_output_codec ? "same codec, duplex" : "ES7210");
   return true;
 }
 
@@ -669,6 +692,9 @@ void FdAudio::write_speaker(const uint8_t *src, size_t len) {
 
 void FdAudio::deinit_() {
   if (out_dev_) { esp_codec_dev_close((esp_codec_dev_handle_t) out_dev_); esp_codec_dev_delete((esp_codec_dev_handle_t) out_dev_); out_dev_ = nullptr; }
+  // With a duplex codec, in_dev_ IS out_dev_: it has already been closed and
+  // deleted just above, so only drop the alias.
+  if (shared_dev_) { in_dev_ = nullptr; shared_dev_ = false; }
   if (in_dev_) { esp_codec_dev_close((esp_codec_dev_handle_t) in_dev_); esp_codec_dev_delete((esp_codec_dev_handle_t) in_dev_); in_dev_ = nullptr; }
   if (tx_chan_) { i2s_channel_disable(tx_chan_); }
   if (rx_chan_) { i2s_channel_disable(rx_chan_); }

@@ -26,6 +26,7 @@ CONF_I2C_PORT = "i2c_port"
 CONF_OUTPUT_CODEC = "output_codec"
 CONF_OUTPUT_ADDRESS = "output_address"
 CONF_MIC_ADDRESS = "mic_address"
+CONF_MIC_SOURCE = "mic_source"
 CONF_MIC_GAIN_DB = "mic_gain_db"
 CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
@@ -48,6 +49,25 @@ OUTPUT_CODECS = {
     "es8388": OutputCodec.OUT_ES8388,
 }
 
+MicSource = fdaudio_ns.enum("MicSource")
+
+# Where the microphone is digitised.
+#
+#   es7210        - a dedicated ES7210 ADC at `mic_address` (0x40). The default,
+#                   and what the ESP32-P4 function evboard has.
+#   output_codec  - the ES8311/ES8388's own ADC. Several boards, including the
+#                   Waveshare ESP32-P4-NANO, carry no ES7210 at all: their I2C
+#                   scan shows 0x18 and no 0x40, and the analog microphone is
+#                   wired straight into the output codec.
+#
+# Getting this wrong is not a subtle fault: creating the ES7210 fails, and that
+# failure aborts init_codecs_() as a whole -- so the SPEAKER dies with the
+# microphone, and the board produces no audio at all.
+MIC_SOURCES = {
+    "es7210": MicSource.MIC_FROM_ES7210,
+    "output_codec": MicSource.MIC_FROM_OUTPUT_CODEC,
+}
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(FdAudio),
@@ -62,6 +82,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_OUTPUT_CODEC, default="es8311"): cv.enum(OUTPUT_CODECS, lower=True),
         cv.Optional(CONF_OUTPUT_ADDRESS, default=0x18): cv.i2c_address,
         cv.Optional(CONF_MIC_ADDRESS, default=0x40): cv.i2c_address,
+        cv.Optional(CONF_MIC_SOURCE, default="es7210"): cv.enum(MIC_SOURCES, lower=True),
         cv.Optional(CONF_MIC_GAIN_DB, default=37.5): cv.float_range(min=0.0, max=42.0),
         # ES7210 mic input bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8 (combine to enable
         # several, e.g. 3 = MIC1+MIC2). Default MIC1; change if your board wires
@@ -122,6 +143,7 @@ async def to_code(config):
     cg.add(var.set_i2c_port(config[CONF_I2C_PORT]))
     cg.add(var.set_output_codec(config[CONF_OUTPUT_CODEC]))
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))
+    cg.add(var.set_mic_source(config[CONF_MIC_SOURCE]))
     cg.add(var.set_mic_gain_db(config[CONF_MIC_GAIN_DB]))
     cg.add(var.set_mic_channels(config[CONF_MIC_CHANNELS]))
     cg.add(var.set_out_volume(config[CONF_OUTPUT_VOLUME]))

@@ -28,6 +28,12 @@ enum OutputCodec : uint8_t {
   OUT_ES8388 = 1,
 };
 
+/// Which chip digitises the microphone.
+enum MicSource : uint8_t {
+  MIC_FROM_ES7210 = 0,        ///< a dedicated ES7210 ADC, the default
+  MIC_FROM_OUTPUT_CODEC = 1,  ///< the ES8311/ES8388's own ADC, no ES7210 needed
+};
+
 // The shared full-duplex engine. One per device.
 class FdAudio : public Component {
  public:
@@ -46,6 +52,14 @@ class FdAudio : public Component {
   void set_codec_addrs(uint8_t out_addr, uint8_t in_addr) { out_addr_ = out_addr; in_addr_ = in_addr; }
   void set_mic_gain_db(float g) { mic_gain_db_ = g; }
   void set_mic_channels(uint8_t m) { mic_channels_ = m; }
+  /// Where the microphone is captured.
+  ///
+  /// Not every board has an ES7210. Several ESP32-P4 boards -- the Waveshare
+  /// ESP32-P4-NANO among them -- carry only the ES8311 and route the analog
+  /// microphone into that codec's own ADC. On those, `MIC_FROM_OUTPUT_CODEC`
+  /// opens the output codec in duplex instead of looking for a chip that is not
+  /// on the bus.
+  void set_mic_source(MicSource s) { mic_source_ = s; }
   void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
   void set_noise_gate(int t) { noise_gate_thresh_ = t; }
   // Far-end ducking (echo suppression for calls): when the speaker is playing
@@ -113,6 +127,10 @@ class FdAudio : public Component {
   float agc_gain_{1.0f};
   int i2c_port_{0};
   OutputCodec out_codec_{OUT_ES8311};
+  MicSource mic_source_{MIC_FROM_ES7210};
+  /// True when one duplex device serves both directions, so the teardown does
+  /// not close and delete the same handle twice.
+  bool shared_dev_{false};
   uint8_t out_addr_{0x18}, in_addr_{0x40};
   float mic_gain_db_{37.5f};
   uint8_t mic_channels_{0x01};  // ES7210 mic bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8
