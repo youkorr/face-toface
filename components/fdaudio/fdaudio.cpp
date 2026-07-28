@@ -148,9 +148,14 @@ bool FdAudio::init_codecs_() {
 
   // When the board has no ES7210, the output codec digitises the microphone
   // too, so it must be opened in duplex rather than DAC-only.
+  //
+  // `auto` on purpose. esp_codec_dev spells the enum's constants
+  // ESP_CODEC_DEV_WORK_MODE_* but names the type itself
+  // esp_codec_dec_work_mode_t -- "dec", not "dev". That is upstream's typo, not
+  // ours, and writing either spelling here bets on which one a given
+  // esp_codec_dev version ships. Deducing the type bets on neither.
   const bool mic_on_output_codec = mic_source_ == MIC_FROM_OUTPUT_CODEC;
-  const esp_codec_dev_work_mode_t out_mode =
-      mic_on_output_codec ? ESP_CODEC_DEV_WORK_MODE_BOTH : ESP_CODEC_DEV_WORK_MODE_DAC;
+  const auto out_mode = mic_on_output_codec ? ESP_CODEC_DEV_WORK_MODE_BOTH : ESP_CODEC_DEV_WORK_MODE_DAC;
 
   if (out_codec_ == OUT_ES8311) {
     es8311_codec_cfg_t cfg = {};
