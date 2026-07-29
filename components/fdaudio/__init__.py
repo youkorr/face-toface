@@ -28,6 +28,8 @@ CONF_OUTPUT_ADDRESS = "output_address"
 CONF_MIC_ADDRESS = "mic_address"
 CONF_MIC_SOURCE = "mic_source"
 CONF_DIGITAL_MIC = "digital_mic"
+CONF_TASK_CORE = "task_core"
+CONF_TASK_PRIORITY = "task_priority"
 CONF_MIC_GAIN_DB = "mic_gain_db"
 CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
@@ -92,6 +94,22 @@ CONFIG_SCHEMA = cv.Schema(
         # wired to. Board documentation rarely says which; if the mic reads
         # digital silence with everything else healthy, flip this.
         cv.Optional(CONF_DIGITAL_MIC, default=False): cv.boolean,
+        # Which core the microphone and speaker tasks are pinned to, and at what
+        # FreeRTOS priority.
+        #
+        # Core 0 by default, and the default matters on a board that also
+        # streams video: these tasks used to sit on core 1 at priority 5, which
+        # is exactly where an MJPEG/RTSP encoder task runs. Three equal-priority
+        # tasks then round-robin one core, and because the two audio ones only
+        # appear once a call starts, the video collapsed at the precise moment
+        # the audio began working.
+        #
+        # Audio has the harder deadline -- an I2S underrun clicks, a dropped
+        # frame does not -- so it gets a core of its own rather than a higher
+        # priority on a shared one. Move it back to 1 only if core 0 is the busy
+        # one on your board.
+        cv.Optional(CONF_TASK_CORE, default=0): cv.int_range(min=0, max=1),
+        cv.Optional(CONF_TASK_PRIORITY, default=5): cv.int_range(min=1, max=24),
         cv.Optional(CONF_MIC_GAIN_DB, default=37.5): cv.float_range(min=0.0, max=42.0),
         # ES7210 mic input bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8 (combine to enable
         # several, e.g. 3 = MIC1+MIC2). Default MIC1; change if your board wires
@@ -154,6 +172,8 @@ async def to_code(config):
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))
     cg.add(var.set_mic_source(config[CONF_MIC_SOURCE]))
     cg.add(var.set_digital_mic(config[CONF_DIGITAL_MIC]))
+    cg.add(var.set_task_core(config[CONF_TASK_CORE]))
+    cg.add(var.set_task_priority(config[CONF_TASK_PRIORITY]))
     cg.add(var.set_mic_gain_db(config[CONF_MIC_GAIN_DB]))
     cg.add(var.set_mic_channels(config[CONF_MIC_CHANNELS]))
     cg.add(var.set_out_volume(config[CONF_OUTPUT_VOLUME]))

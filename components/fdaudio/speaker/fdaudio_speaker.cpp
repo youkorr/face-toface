@@ -25,7 +25,8 @@ void FdAudioSpeaker::start() {
   }
   this->want_run_ = true;
   this->state_ = speaker::STATE_STARTING;
-  xTaskCreatePinnedToCore(write_task_, "fdaudio_spk", 4096, this, 5, &this->task_, 1);
+  xTaskCreatePinnedToCore(write_task_, "fdaudio_spk", 4096, this, parent_->task_priority(),
+                          &this->task_, parent_->task_core());
 }
 
 void FdAudioSpeaker::stop() {

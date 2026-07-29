@@ -61,6 +61,12 @@ class FdAudio : public Component {
   /// on the bus.
   void set_mic_source(MicSource s) { mic_source_ = s; }
   void set_digital_mic(bool d) { digital_mic_ = d; }
+  void set_task_core(int c) { task_core_ = c; }
+  void set_task_priority(int p) { task_priority_ = p; }
+  /// Where the microphone and speaker tasks run. Read by the mic/speaker
+  /// platforms when they spawn theirs, so both land in the same place.
+  int task_core() const { return task_core_; }
+  int task_priority() const { return task_priority_; }
   void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
   void set_noise_gate(int t) { noise_gate_thresh_ = t; }
   // Far-end ducking (echo suppression for calls): when the speaker is playing
@@ -155,6 +161,15 @@ class FdAudio : public Component {
   /// ES8311 only, and only with mic_source: output_codec. false = analog
   /// differential input (MIC1P/MIC1N), true = PDM digital microphone.
   bool digital_mic_{false};
+  /// Core 0 by default. These tasks used to be pinned to core 1 at priority 5,
+  /// which on a board also streaming video is exactly where the video encoder
+  /// runs -- three equal-priority tasks round-robining one core, with the two
+  /// audio ones appearing only once a call starts. The video died the moment
+  /// the audio worked. Audio is the harder real-time deadline (an I2S underrun
+  /// clicks; a dropped frame does not), so it gets its own core rather than
+  /// yielding priority.
+  int task_core_{0};
+  int task_priority_{5};
   int out_volume_{70};
   bool use_mclk_{true};
   bool aec_enabled_{true};

@@ -36,7 +36,8 @@ void FdAudioMicrophone::loop() {
     this->state_ = microphone::STATE_STARTING;
     // 8 KB stack: the esp-sr aec_process() DSP overflows a 4 KB stack (crash on
     // some boards when enable_aec is on).
-    xTaskCreatePinnedToCore(read_task_, "fdaudio_mic", 8192, this, 5, &this->task_, 1);
+    xTaskCreatePinnedToCore(read_task_, "fdaudio_mic", 8192, this, parent_->task_priority(),
+                            &this->task_, parent_->task_core());
   } else if (!want && this->state_ == microphone::STATE_RUNNING) {
     this->want_run_ = false;  // task exits on its own; engine_stop happens there
     this->state_ = microphone::STATE_STOPPING;
