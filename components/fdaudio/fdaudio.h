@@ -98,6 +98,15 @@ class FdAudio : public Component {
   bool init_codecs_();
   bool init_aec_();
   void deinit_();
+  /// Release the I2S channels. A channel pair is a finite hardware resource:
+  /// leak one and every later i2s_new_channel() on that port returns
+  /// ESP_ERR_NOT_FOUND, so the original fault hides behind a wrong error for the
+  /// rest of the boot. Safe to call at any point of a partial init.
+  void free_i2s_();
+  /// Release everything init_codecs_() created, in reverse order. Called on the
+  /// failure path too, because the microphone retries from loop(): without it,
+  /// every attempt would allocate another set of interfaces.
+  void free_codecs_();
   void run_aec_(int16_t *mic, size_t samples);  // in-place on mic buffer
   // True while the far end (speaker) has played recently enough that its echo is
   // still in the mic and the AEC/AFE should adapt; false during silence so the
@@ -152,6 +161,16 @@ class FdAudio : public Component {
   void *gpio_if_{nullptr};
   void *out_codec_if_{nullptr};
   void *in_codec_if_{nullptr};
+  // The two I2C control interfaces. Members rather than locals so the teardown
+  // can actually delete them.
+  void *out_ctrl_if_{nullptr};
+  void *in_ctrl_if_{nullptr};
+
+  // Failed-start backoff. engine_start() is called from the microphone's loop(),
+  // so without a brake a failing init runs thousands of times a minute.
+  static constexpr uint32_t START_RETRY_MS = 1000;
+  bool start_failed_{false};
+  uint32_t last_start_fail_ms_{0};
 
   // AEC (esp-sr simple aec_create path)
   void *aec_handle_{nullptr};

@@ -9,6 +9,9 @@
 
 // ESP-IDF new I2C master driver (to reuse ESPHome's bus by port).
 #include "driver/i2c_master.h"
+// esp_err_to_name(): explicit rather than relying on the I2S headers pulling it
+// in, so a driver-header reshuffle upstream cannot break the build.
+#include "esp_err.h"
 
 // esp_codec_dev (Espressif managed component, pulled in __init__.py)
 #include "esp_codec_dev.h"
@@ -74,8 +77,19 @@ bool FdAudio::init_i2s_() {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.auto_clear = true;
   // Both handles non-NULL => full-duplex on the same port.
-  if (i2s_new_channel(&chan_cfg, &tx_chan_, &rx_chan_) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s_new_channel (duplex) failed");
+  esp_err_t err = i2s_new_channel(&chan_cfg, &tx_chan_, &rx_chan_);
+  if (err != ESP_OK) {
+    // Name the error. "failed" alone costs a round-trip with the user, and the
+    // three plausible causes need three different answers:
+    //   ESP_ERR_NOT_FOUND -- port 0 has no free channel pair. Either another
+    //     driver holds it (an `i2s_audio:` block in the YAML), or an earlier
+    //     attempt leaked one. free_i2s_() exists so it is never the latter.
+    //   ESP_ERR_NO_MEM    -- out of internal DMA-capable RAM.
+    //   ESP_ERR_INVALID_ARG -- bad config, i.e. our bug.
+    ESP_LOGE(TAG, "i2s_new_channel (duplex, port %d) failed: %s", (int) I2S_NUM_0,
+             esp_err_to_name(err));
+    tx_chan_ = nullptr;
+    rx_chan_ = nullptr;
     return false;
   }
 
@@ -91,16 +105,24 @@ bool FdAudio::init_i2s_() {
           .invert_flags = {.mclk_inv = false, .bclk_inv = false, .ws_inv = false},
       },
   };
-  if (i2s_channel_init_std_mode(tx_chan_, &std_cfg) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s tx init_std failed");
+  // Every failure below frees the channels. They were allocated a few lines up,
+  // and returning without releasing them would make the NEXT attempt fail at
+  // i2s_new_channel with ESP_ERR_NOT_FOUND -- reporting a resource problem we
+  // created ourselves instead of the fault that actually stopped us here.
+  if ((err = i2s_channel_init_std_mode(tx_chan_, &std_cfg)) != ESP_OK) {
+    ESP_LOGE(TAG, "i2s tx init_std failed: %s", esp_err_to_name(err));
+    free_i2s_();
     return false;
   }
-  if (i2s_channel_init_std_mode(rx_chan_, &std_cfg) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s rx init_std failed");
+  if ((err = i2s_channel_init_std_mode(rx_chan_, &std_cfg)) != ESP_OK) {
+    ESP_LOGE(TAG, "i2s rx init_std failed: %s", esp_err_to_name(err));
+    free_i2s_();
     return false;
   }
-  if (i2s_channel_enable(tx_chan_) != ESP_OK || i2s_channel_enable(rx_chan_) != ESP_OK) {
-    ESP_LOGE(TAG, "i2s channel enable failed");
+  if ((err = i2s_channel_enable(tx_chan_)) != ESP_OK ||
+      (err = i2s_channel_enable(rx_chan_)) != ESP_OK) {
+    ESP_LOGE(TAG, "i2s channel enable failed: %s", esp_err_to_name(err));
+    free_i2s_();
     return false;
   }
   i2s_ready_ = true;
@@ -112,7 +134,10 @@ bool FdAudio::init_i2s_() {
 // Codecs: ES8311/ES8388 (OUT) + ES7210 (IN) sharing the same I2S data interface
 // ===========================================================================
 bool FdAudio::init_codecs_() {
-  if (out_dev_ != nullptr)
+  // Both devices, not just the output one. A previous partial init could leave
+  // out_dev_ set with no in_dev_, and answering "already done" to that would
+  // hand back a half-built engine whose microphone is permanently silent.
+  if (out_dev_ != nullptr && in_dev_ != nullptr)
     return true;
 
   // Shared data interface (the duplex I2S handles).
@@ -145,6 +170,7 @@ bool FdAudio::init_codecs_() {
   out_i2c.addr = out_addr8;
   out_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *out_ctrl = audio_codec_new_i2c_ctrl(&out_i2c);
+  out_ctrl_if_ = (void *) out_ctrl;
 
   // When the board has no ES7210, the output codec digitises the microphone
   // too, so it must be opened in duplex rather than DAC-only.
@@ -199,6 +225,7 @@ bool FdAudio::init_codecs_() {
   in_i2c.addr = in_addr8;
   in_i2c.bus_handle = i2c_bus;
   const audio_codec_ctrl_if_t *in_ctrl = audio_codec_new_i2c_ctrl(&in_i2c);
+  in_ctrl_if_ = (void *) in_ctrl;
 
   es7210_codec_cfg_t mic_cfg = {};
   mic_cfg.ctrl_if = in_ctrl;
@@ -484,13 +511,39 @@ size_t FdAudio::read_mic_afe_(uint8_t *dst, size_t len) {
 // Engine lifecycle (ref-counted)
 // ===========================================================================
 bool FdAudio::engine_start() {
-  consumers_++;
-  if (running_)
+  if (running_) {
+    consumers_++;
     return true;
+  }
+
+  // The microphone calls this from loop(). A failing init would otherwise be
+  // attempted on every iteration -- thousands of times a minute, each one
+  // allocating and (before free_codecs_) leaking a set of interfaces, turning a
+  // recoverable fault into an out-of-memory reboot. One try per second is ample.
+  const uint32_t now = millis();
+  if (start_failed_ && (now - last_start_fail_ms_) < START_RETRY_MS)
+    return false;
+
   if (!init_i2s_() || !init_codecs_()) {
-    ESP_LOGE(TAG, "engine_start failed");
+    // Leave nothing behind. The I2S channel pair especially: keeping it would
+    // make the next attempt fail at i2s_new_channel with ESP_ERR_NOT_FOUND,
+    // reporting a resource shortage we caused instead of the fault that
+    // actually stopped us -- and no retry could ever succeed.
+    free_codecs_();
+    free_i2s_();
+    last_start_fail_ms_ = now;
+    if (!start_failed_) {
+      ESP_LOGE(TAG, "engine_start failed; retrying at most every %u ms",
+               (unsigned) START_RETRY_MS);
+      start_failed_ = true;
+    }
     return false;
   }
+  if (start_failed_) {
+    ESP_LOGI(TAG, "engine_start recovered");
+    start_failed_ = false;
+  }
+  consumers_++;
   if (use_afe_) {
     // Full AFE (AEC+NS+AGC); fall back to the simple AEC if it fails to init.
     if (!init_afe_() && aec_enabled_)
@@ -695,15 +748,73 @@ void FdAudio::write_speaker(const uint8_t *src, size_t len) {
   esp_codec_dev_write((esp_codec_dev_handle_t) out_dev_, (void *) src, (int) len);
 }
 
-void FdAudio::deinit_() {
-  if (out_dev_) { esp_codec_dev_close((esp_codec_dev_handle_t) out_dev_); esp_codec_dev_delete((esp_codec_dev_handle_t) out_dev_); out_dev_ = nullptr; }
-  // With a duplex codec, in_dev_ IS out_dev_: it has already been closed and
-  // deleted just above, so only drop the alias.
-  if (shared_dev_) { in_dev_ = nullptr; shared_dev_ = false; }
-  if (in_dev_) { esp_codec_dev_close((esp_codec_dev_handle_t) in_dev_); esp_codec_dev_delete((esp_codec_dev_handle_t) in_dev_); in_dev_ = nullptr; }
-  if (tx_chan_) { i2s_channel_disable(tx_chan_); }
-  if (rx_chan_) { i2s_channel_disable(rx_chan_); }
+void FdAudio::free_i2s_() {
+  // i2s_del_channel() requires the channel to be disabled first. Disabling one
+  // that was never enabled just returns ESP_ERR_INVALID_STATE, which is exactly
+  // what we want to ignore here -- this runs on partial-init paths where we do
+  // not know how far we got.
+  if (tx_chan_ != nullptr) {
+    i2s_channel_disable(tx_chan_);
+    i2s_del_channel(tx_chan_);
+    tx_chan_ = nullptr;
+  }
+  if (rx_chan_ != nullptr) {
+    i2s_channel_disable(rx_chan_);
+    i2s_del_channel(rx_chan_);
+    rx_chan_ = nullptr;
+  }
   i2s_ready_ = false;
+}
+
+void FdAudio::free_codecs_() {
+  if (out_dev_ != nullptr) {
+    esp_codec_dev_close((esp_codec_dev_handle_t) out_dev_);
+    esp_codec_dev_delete((esp_codec_dev_handle_t) out_dev_);
+    out_dev_ = nullptr;
+  }
+  // With a duplex codec, in_dev_ IS out_dev_: closed and deleted just above, so
+  // only drop the alias. This must come BEFORE the in_dev_ branch below, or the
+  // same handle gets freed twice.
+  if (shared_dev_) {
+    in_dev_ = nullptr;
+    shared_dev_ = false;
+  }
+  if (in_dev_ != nullptr) {
+    esp_codec_dev_close((esp_codec_dev_handle_t) in_dev_);
+    esp_codec_dev_delete((esp_codec_dev_handle_t) in_dev_);
+    in_dev_ = nullptr;
+  }
+  // Reverse order of creation: codec interfaces, then the I2C control
+  // interfaces they wrap, then the shared data/gpio interfaces.
+  if (out_codec_if_ != nullptr) {
+    audio_codec_delete_codec_if((const audio_codec_if_t *) out_codec_if_);
+    out_codec_if_ = nullptr;
+  }
+  if (in_codec_if_ != nullptr) {
+    audio_codec_delete_codec_if((const audio_codec_if_t *) in_codec_if_);
+    in_codec_if_ = nullptr;
+  }
+  if (out_ctrl_if_ != nullptr) {
+    audio_codec_delete_ctrl_if((const audio_codec_ctrl_if_t *) out_ctrl_if_);
+    out_ctrl_if_ = nullptr;
+  }
+  if (in_ctrl_if_ != nullptr) {
+    audio_codec_delete_ctrl_if((const audio_codec_ctrl_if_t *) in_ctrl_if_);
+    in_ctrl_if_ = nullptr;
+  }
+  if (gpio_if_ != nullptr) {
+    audio_codec_delete_gpio_if((const audio_codec_gpio_if_t *) gpio_if_);
+    gpio_if_ = nullptr;
+  }
+  if (data_if_ != nullptr) {
+    audio_codec_delete_data_if((const audio_codec_data_if_t *) data_if_);
+    data_if_ = nullptr;
+  }
+}
+
+void FdAudio::deinit_() {
+  free_codecs_();
+  free_i2s_();
 }
 
 }  // namespace fdaudio
