@@ -27,6 +27,7 @@ CONF_OUTPUT_CODEC = "output_codec"
 CONF_OUTPUT_ADDRESS = "output_address"
 CONF_MIC_ADDRESS = "mic_address"
 CONF_MIC_SOURCE = "mic_source"
+CONF_DIGITAL_MIC = "digital_mic"
 CONF_MIC_GAIN_DB = "mic_gain_db"
 CONF_MIC_CHANNELS = "mic_channels"
 CONF_OUTPUT_VOLUME = "output_volume"
@@ -83,6 +84,14 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_OUTPUT_ADDRESS, default=0x18): cv.i2c_address,
         cv.Optional(CONF_MIC_ADDRESS, default=0x40): cv.i2c_address,
         cv.Optional(CONF_MIC_SOURCE, default="es7210"): cv.enum(MIC_SOURCES, lower=True),
+        # ES8311 only, and only meaningful with mic_source: output_codec. Which
+        # physical microphone the codec listens to: false = the analog
+        # differential input (MIC1P/MIC1N), true = a PDM digital microphone.
+        # Getting it wrong is silent -- no error, no warning, just -100 dBFS
+        # forever, because the codec faithfully digitises an input nothing is
+        # wired to. Board documentation rarely says which; if the mic reads
+        # digital silence with everything else healthy, flip this.
+        cv.Optional(CONF_DIGITAL_MIC, default=False): cv.boolean,
         cv.Optional(CONF_MIC_GAIN_DB, default=37.5): cv.float_range(min=0.0, max=42.0),
         # ES7210 mic input bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8 (combine to enable
         # several, e.g. 3 = MIC1+MIC2). Default MIC1; change if your board wires
@@ -144,6 +153,7 @@ async def to_code(config):
     cg.add(var.set_output_codec(config[CONF_OUTPUT_CODEC]))
     cg.add(var.set_codec_addrs(config[CONF_OUTPUT_ADDRESS], config[CONF_MIC_ADDRESS]))
     cg.add(var.set_mic_source(config[CONF_MIC_SOURCE]))
+    cg.add(var.set_digital_mic(config[CONF_DIGITAL_MIC]))
     cg.add(var.set_mic_gain_db(config[CONF_MIC_GAIN_DB]))
     cg.add(var.set_mic_channels(config[CONF_MIC_CHANNELS]))
     cg.add(var.set_out_volume(config[CONF_OUTPUT_VOLUME]))

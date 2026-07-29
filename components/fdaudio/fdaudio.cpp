@@ -216,6 +216,17 @@ bool FdAudio::init_codecs_() {
     cfg.codec_mode = out_mode;
     cfg.use_mclk = use_mclk_;
     cfg.pa_pin = -1;
+    // Which physical microphone the ES8311 listens to. The driver writes bit 6
+    // of SYSTEM_REG14 from this: set for a PDM digital microphone, clear for the
+    // analog differential input (MIC1P/MIC1N).
+    //
+    // It only matters with `mic_source: output_codec`, and it is the difference
+    // between a working microphone and a dead-silent one -- there is no error,
+    // no warning, just -100 dBFS forever, because the codec is faithfully
+    // digitising an input nothing is connected to. Boards differ and vendor
+    // documentation rarely says which; if the level meter reads digital silence
+    // with everything else healthy, this is the switch to flip.
+    cfg.digital_mic = digital_mic_;
     out_codec_if_ = (void *) es8311_codec_new(&cfg);
   } else {  // ES8388
     es8388_codec_cfg_t cfg = {};

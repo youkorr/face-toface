@@ -60,6 +60,7 @@ class FdAudio : public Component {
   /// opens the output codec in duplex instead of looking for a chip that is not
   /// on the bus.
   void set_mic_source(MicSource s) { mic_source_ = s; }
+  void set_digital_mic(bool d) { digital_mic_ = d; }
   void set_mic_digital_gain(float g) { mic_digital_gain_ = g; }
   void set_noise_gate(int t) { noise_gate_thresh_ = t; }
   // Far-end ducking (echo suppression for calls): when the speaker is playing
@@ -151,6 +152,9 @@ class FdAudio : public Component {
   uint8_t out_addr_{0x18}, in_addr_{0x40};
   float mic_gain_db_{37.5f};
   uint8_t mic_channels_{0x01};  // ES7210 mic bitmask: MIC1=1 MIC2=2 MIC3=4 MIC4=8
+  /// ES8311 only, and only with mic_source: output_codec. false = analog
+  /// differential input (MIC1P/MIC1N), true = PDM digital microphone.
+  bool digital_mic_{false};
   int out_volume_{70};
   bool use_mclk_{true};
   bool aec_enabled_{true};
