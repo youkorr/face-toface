@@ -28,6 +28,32 @@
 #include "esp_afe_sr_models.h"
 #endif
 
+// Two sdkconfig options that contradict each other, caught here rather than at
+// runtime. The chain, from the ESP-IDF sources:
+//
+//   * CONFIG_GDMA_ISR_IRAM_SAFE=y forces flags.isr_cache_safe on EVERY GDMA
+//     channel (gdma.c: "for backward compatibility, `CONFIG_GDMA_ISR_IRAM_SAFE`
+//     can still force ALL GDMA ISRs to be cache safe").
+//   * A cache-safe channel makes gdma_register_tx_event_callbacks() require
+//     esp_ptr_internal(user_data).
+//   * The I2S driver passes its channel handle as that user_data, and allocates
+//     it with I2S_MEM_ALLOC_CAPS -- which is MALLOC_CAP_DEFAULT, i.e. it may
+//     land in PSRAM, UNLESS CONFIG_I2S_ISR_IRAM_SAFE=y.
+//
+// So the pair fails with ESP_ERR_INVALID_ARG inside i2s_channel_init_std_mode()
+// and the board produces no audio at all -- ten seconds into the boot, with a
+// message that names neither option. Refuse to build instead.
+#if defined(CONFIG_GDMA_ISR_IRAM_SAFE) && !defined(CONFIG_I2S_ISR_IRAM_SAFE)
+#error "fdaudio: CONFIG_GDMA_ISR_IRAM_SAFE=y without CONFIG_I2S_ISR_IRAM_SAFE=y cannot work. \
+It forces every GDMA channel's ISR to be cache-safe, which makes the I2S driver require its \
+channel handle to be in internal RAM -- but without CONFIG_I2S_ISR_IRAM_SAFE that handle is \
+allocated with MALLOC_CAP_DEFAULT and can land in PSRAM, so i2s_channel_init_std_mode() fails \
+with ESP_ERR_INVALID_ARG and there is no audio. Fix your sdkconfig_options: either DROP \
+CONFIG_GDMA_ISR_IRAM_SAFE (recommended -- it is an ESP-IDF backward-compatibility switch, off \
+by default, and it costs IRAM you need for LVGL and the camera), or add CONFIG_I2S_ISR_IRAM_SAFE: y \
+next to it."
+#endif
+
 namespace esphome {
 namespace fdaudio {
 
