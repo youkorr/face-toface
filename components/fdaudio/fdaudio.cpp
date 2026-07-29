@@ -715,7 +715,21 @@ size_t FdAudio::read_mic(uint8_t *dst, size_t len) {
   // back (the robust intercom fix when AEC alone can't cancel it). Smoothed to
   // avoid pumping: ducks fast (~3 ms), releases slower (~17 ms).
   if (echo_suppress_ > 0) {
-    const bool far_active = (millis() - last_spk_ms_ < 120) && (last_spk_peak_ > 800);
+    // Hangover, not an instantaneous test. `last_spk_peak_` is the peak of the
+    // LAST frame written, so testing it directly made the duck follow the
+    // far-end waveform: it lifted in the dip between two words, the microphone
+    // caught the room still ringing from the first one, and that went back down
+    // the line. An echo on every word, from a suppressor that was working
+    // exactly as written.
+    //
+    // Instead: remember when the far end was last genuinely loud, and stay
+    // ducked for ECHO_HOLD_MS after that. Speech dips of a few tens of
+    // milliseconds no longer reopen the microphone; only a real silence does.
+    // The != 0 keeps the microphone open during the first ECHO_HOLD_MS after
+    // boot, when nothing has played yet and the subtraction would otherwise
+    // read as "the far end just spoke".
+    const bool far_active =
+        last_loud_spk_ms_ != 0 && (millis() - last_loud_spk_ms_) < ECHO_HOLD_MS;
     const float floor = 1.0f - (float) echo_suppress_ / 100.0f;
     for (size_t i = 0; i < got / 2; i++) {
       if (far_active)
@@ -748,6 +762,11 @@ void FdAudio::write_speaker(const uint8_t *src, size_t len) {
     }
     last_spk_peak_ = p;
     last_spk_ms_ = millis();
+    // Separate from last_spk_ms_, which marks any write at all (silence fill
+    // included). This one marks the far end actually SAYING something, and is
+    // what the ducking hangover in read_mic() counts from.
+    if (p > 800)
+      last_loud_spk_ms_ = last_spk_ms_;
   }
 #ifdef FDAUDIO_USE_AEC
   // Store the far-end frame as the echo reference, decimated to mic_rate_ so it

@@ -130,6 +130,14 @@ class FdAudio : public Component {
   float duck_gain_{1.0f};
   uint32_t last_spk_ms_{0};
   int32_t last_spk_peak_{0};
+  /// Last time the far end was genuinely loud (peak > 800), as opposed to any
+  /// write at all. The ducking hangover counts from this.
+  uint32_t last_loud_spk_ms_{0};
+  /// How long the microphone stays ducked after the far end goes quiet. Must
+  /// outlast the gaps inside speech (~50-200 ms) or the duck lifts between two
+  /// words and lets the room's echo of the first one through; 400 ms also
+  /// covers a normal room's reverberation without swallowing a reply.
+  static constexpr uint32_t ECHO_HOLD_MS = 400;
   // Automatic gain control (0 = off, else target peak level).
   int mic_agc_target_{0};
   float agc_env_{0.0f};
